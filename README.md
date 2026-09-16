@@ -142,6 +142,17 @@ python3 hand_cam.py            # NPU 推論 + 串流
    ```
 3. 在筆電執行 `ssh root@192.168.7.2`，就可以開始工作了。
 
+- 腳本會跳過已經連好的部分，重複執行也沒關係。
+- 顯示 `usb : laptop NOT connected`：檢查 A 對 C 線是否接在筆電 USB-A ↔ 板子 `USB1_C`，拔掉重插一次。
+- 顯示 `wifi: not associated` 但熱點明明有開（筆電也搜尋得到）：Wi-Fi 可能卡住了，照下面四行重設（在 USB SSH 裡執行，不會斷線）：
+  ```bash
+  killall wpa_supplicant
+  sleep 2; rm -f /var/run/wpa_supplicant/mlan0
+  ip link set mlan0 down; ip link set mlan0 up
+  sh /root/edge-gesture-control/board/bringup.sh
+  ```
+  還是不行的話，就 `reboot` 重開板子。
+
 `bringup.sh` 做的事情等同於以下指令，腳本有問題時可以手動一行一行輸入：
 ```bash
 sh /root/edge-gesture-control/board/usb_net.sh
@@ -158,6 +169,7 @@ udhcpc -i mlan0
 - [x] 修正 Vela 模型，NPU 單張圖片測試正確（跟 PC 上 CPU 的結果一致）
 - [x] 即時鏡頭 + 瀏覽器看骨架：板子約 30 FPS（等於 C270 的上限）
 - [x] USB 直連網路，串流很順
+- [x] `bringup.sh`：開機後一行設定好 USB 直連和 Wi-Fi，已在板子上驗證
 - [ ] 用 `benchmark_model` 量 NPU / CPU 推論時間，填進下方的效能紀錄
 - [ ] 在板子上安裝 `paho-mqtt`，打通 MQTT（板子 → 筆電）
 - [ ] 開機自動執行 `usb_net.sh`（Wi-Fi 會換網路，是否也要自動連線之後再決定）
@@ -193,6 +205,9 @@ NPU 分工：偵測模型的後處理（`TFLite_Detection_PostProcess`）在 CPU
 - **`g_ether` 在 Windows 上被認成「USB 序列裝置 (COMx)」**，也無法手動改成網卡驅動 → 改用 `usb_net.sh`（NCM）。
 - **C 對 C 線接 `USB1_C` 時辨識不到** → 改用 A 對 C 線接筆電的 USB-A。
 - `dmesg` 裡的 `ethosu: can't change firmware ...`：每次啟動 NPU 程式都會出現，可以忽略。
+- **Wi-Fi 卡在 SCANNING，找不到熱點**（2026-09-17）：舊版 `bringup.sh` 在同一張網卡上啟動了第二個 `wpa_supplicant`，出現 `ctrl_iface exists and seems to be in use` 和一堆 `Match already configured`。之後 Wi-Fi 就一直顯示在掃描，但找不到熱點。重設 `mlan0` 並重新啟動 `wpa_supplicant` 後就恢復了。新版腳本已經不會重複啟動。
+- **Android 熱點在沒有裝置連線時會自動關閉**，重新開啟後 BSSID 和頻道都會改變。建議在手機上關掉「自動關閉熱點」。
+- 板子的時鐘不準（檔案日期顯示 9/5），開機後沒有自動校時。如果之後遇到 SSL 或憑證錯誤，先檢查 `date`。
 
 ---
 
