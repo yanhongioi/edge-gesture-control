@@ -520,7 +520,8 @@ def process(frame, detector, landmark, person, tracker, args):
             boxes = np.stack([(sy0 + boxes[:, 0] * sh) / fh, (sx0 + boxes[:, 1] * sw) / fw,
                               (sy0 + boxes[:, 2] * sh) / fh, (sx0 + boxes[:, 3] * sw) / fw], 1) \
                 if len(boxes) else boxes
-            cv2.rectangle(frame, (sx0, sy0), (sx1, sy1), (255, 0, 200), 1)
+            if args.debug:
+                cv2.rectangle(frame, (sx0, sy0), (sx1, sy1), (255, 0, 200), 1)
         else:
             boxes, _, scores, det_ms = detector(rgb)
         tried = 0
@@ -536,7 +537,7 @@ def process(frame, detector, landmark, person, tracker, args):
                 accept(roi, xy, z, presence, score, "detect", (0, 200, 255))
                 if tracker is not None:
                     new_tracks.append(tracker.new(xy, float(score)))
-            else:   # 被骨架模型否決的候選框：細紅框
+            elif args.debug:   # 被骨架模型否決的候選框：細紅框
                 cv2.rectangle(frame, roi[:2], roi[2:], (0, 0, 255), 1)
                 cv2.putText(frame, f"{score:.2f}/{presence:.2f}", (roi[0] + 2, roi[3] - 4),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
@@ -587,6 +588,8 @@ def main():
     ap.add_argument("--mqtt-hz", type=float, default=15)
     ap.add_argument("--image", default="", help="單張圖片測試模式")
     ap.add_argument("--verbose", action="store_true", help="每幀印出推論時間")
+    ap.add_argument("--debug", action="store_true",
+                    help="畫出除錯用的框：被骨架模型否決的偵測框 (紅)、在人物附近找手的範圍 (紫)")
     args = ap.parse_args()
 
     det_path, lmk_path, per_path = args.model, args.model_landmark, args.model_person
