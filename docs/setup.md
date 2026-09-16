@@ -1,4 +1,6 @@
-# 01 手部骨架上板教學（FRDM-i.MX93 + Logitech C270）
+# 上板教學：手部骨架（FRDM-i.MX93 + Logitech C270）
+
+從零開始的完整步驟。我們這塊板子目前的實際狀態（IP、接線、進度）記錄在 [README 的「板子狀態」](../README.md#板子狀態)。
 
 目標：C270 接在板子上，板子用 NPU 跑「手部偵測 + 21 點手骨架」，筆電螢幕即時看到畫面與骨架。
 
@@ -345,7 +347,7 @@ python3 hand_cam.py -h                 # 所有參數
    ```bash
    python3 hand_cam.py --mqtt 192.168.7.1
    ```
-   注意：我們板子上的系統沒有 `paho-mqtt`，要先安裝（見 [board_info.md](board_info.md) 的待辦）。
+   注意：我們板子上的系統沒有 `paho-mqtt`，要先安裝（見 [README 的「板子狀態」](../README.md#板子狀態) 的進度清單）。
 
 筆電會即時印出手腕和五個指尖的座標。每筆 MQTT 訊息的格式請見 README。
 
