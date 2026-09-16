@@ -7,6 +7,7 @@
 #   * 鏡頭畫面轉 RGB 再送進模型 (OpenCV 讀進來是 BGR)
 #   * 內建 HTTP MJPEG 串流 -> 筆電瀏覽器開 http://<板子IP>:8080 就能看到畫面+骨架
 #   * 可選：板子 HDMI 螢幕顯示 (--display)、MQTT 送出 21 點座標 (--mqtt)
+#   * 手部追蹤：找到手之後用上一幀的骨架範圍當裁切框，只跑骨架模型；跟丟才跑手部偵測
 #   * 人物定位：每 N 幀跑一次人物偵測 (MobileNetSSD_VehicleHumanDetector)，標出人的中心點
 #     和偏離畫面中央的量 dx，給之後的雲台用
 #
@@ -142,6 +143,51 @@ def expand_box(box, fw, fh):
     x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
     x1, y1 = min(fw, int(round(x1))), min(fh, int(round(y1)))
     return x0, y0, x1, y1
+
+
+def iou(a, b):
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+class HandTracker:
+    """手部追蹤 (MediaPipe 的做法)：
+    找到手之後，下一幀的裁切框 = 上一幀 21 點的範圍 (正方形、放大 scale 倍) + 移動速度預測，
+    只跑骨架模型；骨架信心不夠 (跟丟) 才回頭跑手部偵測。
+    手部偵測在遠一點或手動來動去時常常找不到手，追蹤可以把手「接住」。"""
+
+    MIN_SIDE = 24
+
+    def __init__(self, scale):
+        self.scale = scale
+        self.tracks = []      # [{"pts": (21,2) 像素, "vel": (2,), "score": 偵測分數}]
+
+    def roi(self, track, fw, fh):
+        pts = track["pts"]
+        x0, y0 = pts.min(0)
+        x1, y1 = pts.max(0)
+        side = min(max(x1 - x0, y1 - y0) * self.scale, max(fw, fh))
+        cx, cy = (x0 + x1) / 2 + track["vel"][0], (y0 + y1) / 2 + track["vel"][1]
+        r = (max(0, int(cx - side / 2)), max(0, int(cy - side / 2)),
+             min(fw, int(cx + side / 2)), min(fh, int(cy + side / 2)))
+        if r[2] - r[0] < self.MIN_SIDE or r[3] - r[1] < self.MIN_SIDE:
+            return None
+        return r
+
+    @staticmethod
+    def follow(track, pts):
+        """用這一幀的結果更新 track (速度 = 中心點位移，限制在手的大小以內)"""
+        old_c, new_c = track["pts"].mean(0), pts.mean(0)
+        size = max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1]))
+        vel = np.clip(new_c - old_c, -size / 2, size / 2)
+        return {"pts": pts, "vel": vel, "score": track["score"]}
+
+    @staticmethod
+    def new(pts, score):
+        return {"pts": pts, "vel": np.zeros(2), "score": score}
 
 
 PERSON_CLASS = 0      # COCO label: 0 = person
@@ -384,9 +430,9 @@ def draw_hand(frame, px, py):
         cv2.circle(frame, (px[i], py[i]), 4, color, -1)
 
 
-def process(frame, detector, landmark, person, args):
+def process(frame, detector, landmark, person, tracker, args):
     """在 frame 上畫出結果，回傳 (hands, person_info, (det_ms, lmk_ms, person_ms))；
-    座標皆為 0~1 正規化；person_ms 在這一幀沒跑人物偵測時為 0"""
+    座標皆為 0~1 正規化；沒跑的模型時間為 0"""
     fh, fw = frame.shape[:2]
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     person_ms = 0.0
@@ -394,45 +440,78 @@ def process(frame, detector, landmark, person, args):
         if person.update(rgb):
             person_ms = person.ms
         person.draw(frame)
-    boxes, _, scores, det_ms = detector(rgb)
 
-    # 手部偵測常常給出「不是手」的高分框，所以依分數由高到低，最多試 --hand-candidates 個框，
-    # 讓骨架模型判斷哪個才是手；找到 --max-hands 隻就停，所以第一個框就是手時不會多花時間
-    hands, lmk_ms, tried, presences = [], 0.0, 0, []
-    for box, score in sorted(zip(boxes, scores), key=lambda t: -t[1]):
-        if score < args.det_thresh or len(hands) >= args.max_hands or tried >= args.hand_candidates:
-            break
-        x0, y0, x1, y1 = expand_box(box, fw, fh)
-        if x1 - x0 < 8 or y1 - y0 < 8:
-            continue
-        tried += 1
+    hands, rois, new_tracks, presences = [], [], [], []
+    lmk_ms = det_ms = 0.0
 
+    def run_landmark(roi):
+        nonlocal lmk_ms
+        x0, y0, x1, y1 = roi
         pts, presence, ms = landmark(rgb[y0:y1, x0:x1])
         lmk_ms += ms
         presences.append(presence)
-        ok = presence >= args.lmk_thresh
-        if ok:
-            cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 200, 255), 2)
-            cv2.putText(frame, f"hand {score:.2f}  lmk {presence:.2f}", (x0, max(14, y0 - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 0), 2)
-        else:   # 被骨架模型否決的候選框：細紅框
-            cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 0, 255), 1)
-            cv2.putText(frame, f"{score:.2f}/{presence:.2f}", (x0 + 2, y1 - 4),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
-            continue
         sx, sy = (x1 - x0) / landmark.w, (y1 - y0) / landmark.h
-        px = [x0 + int(p[0] * sx) for p in pts]
-        py = [y0 + int(p[1] * sy) for p in pts]
+        xy = np.stack([x0 + pts[:, 0] * sx, y0 + pts[:, 1] * sy], 1)
+        return xy, pts[:, 2], presence
+
+    def accept(roi, xy, z, presence, score, source, color):
+        x0, y0, x1, y1 = roi
+        cv2.rectangle(frame, (x0, y0), (x1, y1), color, 2)
+        label = f"track  lmk {presence:.2f}" if source == "track" else f"hand {score:.2f}  lmk {presence:.2f}"
+        cv2.putText(frame, label, (x0, max(14, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+        px, py = xy[:, 0].astype(int).tolist(), xy[:, 1].astype(int).tolist()
         draw_hand(frame, px, py)
+        rois.append(roi)
         hands.append({
+            "source": source,
             "score": round(float(score), 3),
             "presence": round(presence, 3),
             "box": [round(x0 / fw, 4), round(y0 / fh, 4), round(x1 / fw, 4), round(y1 / fh, 4)],
-            "landmarks": [[round(px[i] / fw, 4), round(py[i] / fh, 4), round(float(pts[i][2]), 2)]
+            "landmarks": [[round(px[i] / fw, 4), round(py[i] / fh, 4), round(float(z[i]), 2)]
                           for i in range(21)],
         })
+
+    # 1) 追蹤：沿用上一幀的手，只跑骨架模型
+    if tracker is not None:
+        for track in tracker.tracks:
+            if len(hands) >= args.max_hands:
+                break
+            roi = tracker.roi(track, fw, fh)
+            if roi is None or any(iou(roi, r) > 0.3 for r in rois):
+                continue
+            xy, z, presence = run_landmark(roi)
+            if presence >= args.lmk_thresh:
+                accept(roi, xy, z, presence, track["score"], "track", (255, 255, 0))
+                new_tracks.append(tracker.follow(track, xy))
+
+    # 2) 偵測：手還不夠 (還沒找到或跟丟了) 才跑手部偵測。
+    #    偵測模型常給出「不是手」的高分框，所以依分數由高到低最多試 --hand-candidates 個
+    det_ran = len(hands) < args.max_hands
+    if det_ran:
+        boxes, _, scores, det_ms = detector(rgb)
+        tried = 0
+        for box, score in sorted(zip(boxes, scores), key=lambda t: -t[1]):
+            if score < args.det_thresh or len(hands) >= args.max_hands or tried >= args.hand_candidates:
+                break
+            roi = expand_box(box, fw, fh)
+            if roi[2] - roi[0] < 8 or roi[3] - roi[1] < 8 or any(iou(roi, r) > 0.3 for r in rois):
+                continue
+            tried += 1
+            xy, z, presence = run_landmark(roi)
+            if presence >= args.lmk_thresh:
+                accept(roi, xy, z, presence, score, "detect", (0, 200, 255))
+                if tracker is not None:
+                    new_tracks.append(tracker.new(xy, float(score)))
+            else:   # 被骨架模型否決的候選框：細紅框
+                cv2.rectangle(frame, roi[:2], roi[2:], (0, 0, 255), 1)
+                cv2.putText(frame, f"{score:.2f}/{presence:.2f}", (roi[0] + 2, roi[3] - 4),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
+
+    if tracker is not None:
+        tracker.tracks = new_tracks
     person_info = person.as_dict(fw, fh) if person is not None else None
     process.last_presences = presences      # 給主迴圈做統計
+    process.last_det_ran = det_ran
     return hands, person_info, (det_ms, lmk_ms, person_ms)
 
 
@@ -457,6 +536,8 @@ def main():
                     help="hand detection score threshold (the model outputs junk boxes at exactly 0.50 when there is no hand)")
     ap.add_argument("--lmk-thresh", type=float, default=0.7, help="手骨信心分數門檻")
     ap.add_argument("--max-hands", type=int, default=1, help="每幀最多處理幾隻手 (每多一隻多一次推論)")
+    ap.add_argument("--no-track", action="store_true", help="關閉手部追蹤 (每幀都跑手部偵測)")
+    ap.add_argument("--track-scale", type=float, default=1.8, help="追蹤時裁切框 = 骨架範圍 x 這個倍數")
     ap.add_argument("--hand-candidates", type=int, default=2,
                     help="每幀最多拿幾個手部偵測框給骨架模型確認 (前面的框被否決才會試下一個)")
     ap.add_argument("--port", type=int, default=8080, help="HTTP 串流埠，0 = 不開")
@@ -483,6 +564,7 @@ def main():
     print(f"delegate = {args.delegate}")
     detector = SsdDetector(det_path, args.delegate, "hand detect")
     landmark = HandLandmark(lmk_path, args.delegate)
+    tracker = None if args.no_track else HandTracker(args.track_scale)
     person = None
     if args.person_every > 0:
         person = PersonLocator(SsdDetector(per_path, args.delegate, "person detect"),
@@ -493,7 +575,8 @@ def main():
         frame = cv2.imread(args.image)
         if frame is None:
             sys.exit(f"讀不到圖片: {args.image}")
-        hands, person_info, (det_ms, lmk_ms, per_ms) = process(frame, detector, landmark, person, args)
+        hands, person_info, (det_ms, lmk_ms, per_ms) = process(frame, detector, landmark, person,
+                                                                None, args)
         os.makedirs(os.path.join(HERE, "output"), exist_ok=True)
         out = os.path.join(HERE, "output",
                            os.path.splitext(os.path.basename(args.image))[0] + "_hand_cam.jpg")
@@ -521,7 +604,7 @@ def main():
         print("注意：沒開串流/顯示/MQTT，只會在終端機印 FPS")
 
     fps, last_print = 0.0, time.time()
-    n_frames = n_cand = n_ok = n_tries = 0
+    n_frames = n_cand = n_ok = n_tries = n_det = 0
     pres_sum = 0.0
 
     # Ctrl+C 只設旗標，等這一幀跑完再結束；直接中斷會打斷 NPU 推論 (Failed to invoke ethos_u op)
@@ -539,10 +622,11 @@ def main():
                 frame = cv2.flip(frame, 1)
 
             hands, person_info, (det_ms, lmk_ms, per_ms) = process(frame, detector, landmark,
-                                                                    person, args)
+                                                                    person, tracker, args)
 
             n_frames += 1
             n_tries += len(process.last_presences)
+            n_det += process.last_det_ran
             if process.last_presences:
                 n_cand += 1
                 pres_sum += max(process.last_presences)
@@ -570,10 +654,10 @@ def main():
             if args.verbose or time.time() - last_print > 2:
                 ptxt = f"  person dx={person_info['dx']:+.2f}" if person_info else "  person -"
                 stat = (f"  | ok {100 * n_ok / n_frames:3.0f}%  lmk-best {pres_sum / n_cand if n_cand else 0:.2f}"
-                        f"  tries {n_tries / n_frames:.1f}/frame")
+                        f"  tries {n_tries / n_frames:.1f}/frame  det-run {100 * n_det / n_frames:3.0f}%")
                 print(info + f"  hands={len(hands)}" + (ptxt if person is not None else "") + stat)
                 last_print = time.time()
-                n_frames = n_cand = n_ok = n_tries = 0
+                n_frames = n_cand = n_ok = n_tries = n_det = 0
                 pres_sum = 0.0
     except KeyboardInterrupt:
         pass
