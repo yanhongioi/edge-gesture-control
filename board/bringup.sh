@@ -18,17 +18,43 @@ if [ ! -f "$CONF" ]; then
     echo "wifi: no $CONF, skipped (see docs/setup.md 3-A)"
     exit 0
 fi
-killall wpa_supplicant udhcpc 2>/dev/null
-ip link set mlan0 up
-wpa_supplicant -B -i mlan0 -D nl80211 -c "$CONF" >/dev/null 2>&1
-sleep 3
+
+killall wpa_supplicant udhcpc 2>/dev/null && sleep 1
+if ! ip link show mlan0 >/dev/null 2>&1; then
+    echo "wifi: mlan0 missing, loading driver..."
+    modprobe moal mod_para=nxp/wifi_mod_para.conf
+    sleep 3
+fi
+ip link set mlan0 up || { echo "wifi: cannot bring up mlan0"; exit 1; }
+
+if ! wpa_supplicant -B -i mlan0 -D nl80211 -c "$CONF" > /tmp/wpa_start.log 2>&1; then
+    echo "wifi: wpa_supplicant failed to start:"
+    cat /tmp/wpa_start.log
+    exit 1
+fi
+
+# 等到真的連上熱點 (最多 20 秒) 才要 IP
+state=""
+i=0
+while [ $i -lt 20 ]; do
+    state=$(wpa_cli -i mlan0 status 2>/dev/null | sed -n 's/^wpa_state=//p')
+    [ "$state" = "COMPLETED" ] && break
+    sleep 1
+    i=$((i + 1))
+done
+if [ "$state" != "COMPLETED" ]; then
+    echo "wifi: not associated (wpa_state=${state:-unknown}). Hotspot on? Name/password right?"
+    echo "      networks seen: $(wpa_cli -i mlan0 scan_results 2>/dev/null | awk 'NR>1{print $5}' | sort -u | tr '\n' ' ')"
+    exit 1
+fi
+
 if udhcpc -i mlan0 -n -t 5 >/dev/null 2>&1; then
-    echo "wifi: $(ip -4 -o addr show mlan0 | awk '{print $4}')"
+    echo "wifi: $(ip -4 -o addr show mlan0 | awk '{print $4}') ($(wpa_cli -i mlan0 status | sed -n 's/^ssid=//p'))"
     if ping -c 1 -W 3 8.8.8.8 >/dev/null 2>&1; then
         echo "net : internet OK"
     else
         echo "net : no internet"
     fi
 else
-    echo "wifi: could not connect (is the hotspot on? see docs/setup.md 3-A)"
+    echo "wifi: associated but no IP from DHCP"
 fi
