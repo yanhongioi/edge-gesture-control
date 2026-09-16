@@ -27,7 +27,9 @@
 | `ai_edge_litert` | ✅ |
 | OpenCV (python3) | 4.12.0 ✅ |
 | `paho-mqtt` | ❌ 未安裝（不是官方的 MQTT image）→ 要用 MQTT 時需要另外安裝 |
-| 官方手部範例 | `/root/hand-demo/`（`app.py`、`model/`（8 個模型）、`img/`、`output/`），與 WPI 原版 MobileNetSSD_HandAndSKeletonDetect 相同 |
+| TFLite 版本 | 2.19.0（python 3.13），會顯示 `tf.lite.Interpreter is deprecated` 警告，不影響執行 |
+| 官方手部範例 | `/root/hand-demo/`（`app.py`、`model/`（8 個模型）、`img/`、`output/`），與 WPI 原版 MobileNetSSD_HandAndSKeletonDetect 相同。**其中的 `_vela` 模型在 TFLite 2.19 無法載入**（見下方已知問題），請改用 repo 裡修正過的版本 |
+| 我們的程式 | `/root/edge-gesture-control/board/`（從筆電 scp 過去） |
 
 ## 周邊與介面
 
@@ -86,12 +88,16 @@ ip addr show mlan0          # 看新的 IP
 - [x] 板子透過手機熱點上網、取得 IP
 - [x] 筆電 ping 得到板子、SSH 登入成功
 - [ ] VS Code Remote-SSH
-- [ ] 把 `board/` 部署到板子
+- [x] 把 `board/` 部署到板子（scp）
 - [ ] 用 `benchmark_model` 量 NPU / CPU 推論時間 → 填到下表
 - [ ] 單張圖片測試（`hand_cam.py --image`）
 - [ ] 即時鏡頭 + 瀏覽器看骨架 → 記錄 FPS
 - [ ] MQTT（需要先安裝 paho-mqtt）
 - [ ] 改用充電器供電、Wi-Fi 開機自動連線
+
+## 已知問題
+
+- **官方 Vela 模型載入失敗**：錯誤為 `Tensor 8 is invalidly specified in schema`。原因是舊版 Vela 讓 `*_scratch_fast` tensor 指向一個空的 buffer，TFLite 2.19 會拒絕載入。已用 `scripts/fix_vela_scratch.py` 修正 repo 裡的兩個 `_vela.tflite`（2026-09-16）。
 
 ## 效能紀錄
 
