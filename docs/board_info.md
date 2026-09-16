@@ -90,7 +90,7 @@ ip addr show mlan0          # 看新的 IP
 - [ ] VS Code Remote-SSH
 - [x] 把 `board/` 部署到板子（scp）
 - [ ] 用 `benchmark_model` 量 NPU / CPU 推論時間 → 填到下表
-- [ ] 單張圖片測試（`hand_cam.py --image`）
+- [x] 單張圖片測試（`hand_cam.py --image`，NPU）：結果正確，與 PC CPU 結果一致
 - [ ] 即時鏡頭 + 瀏覽器看骨架 → 記錄 FPS
 - [ ] MQTT（需要先安裝 paho-mqtt）
 - [ ] 改用充電器供電、Wi-Fi 開機自動連線
@@ -101,8 +101,11 @@ ip addr show mlan0          # 看新的 IP
 
 ## 效能紀錄
 
+NPU 分工（delegate 訊息）：偵測模型 `1 nodes delegated out of 2`，後處理 `TFLite_Detection_PostProcess` 在 CPU；骨架模型 `1 of 5`，輸入輸出的量化轉換在 CPU。
+
+
 | 模型 | NPU (vela) | CPU |
 | --- | --- | --- |
-| hand_detect_20000_quant | | |
-| hand_landmark_new_256x256_integer_quant | | |
+| hand_detect_20000_quant | 9.8 ms（單張圖片、第一次推論，含暖機） | |
+| hand_landmark_new_256x256_integer_quant | 12.2 ms（同上） | |
 | `hand_cam.py` 即時 FPS | | |

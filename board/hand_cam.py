@@ -68,9 +68,9 @@ def make_interpreter(path, delegate):
 def describe(name, interp):
     print(f"[{name}]")
     for d in interp.get_input_details():
-        print(f"  in  : {d['name']:<44} shape={list(d['shape'])} dtype={d['dtype'].__name__}")
+        print(f"  in  : {d['name']:<44} shape={[int(x) for x in d['shape']]} dtype={d['dtype'].__name__}")
     for i, d in enumerate(interp.get_output_details()):
-        print(f"  out{i}: {d['name']:<44} shape={list(d['shape'])} dtype={d['dtype'].__name__}")
+        print(f"  out{i}: {d['name']:<44} shape={[int(x) for x in d['shape']]} dtype={d['dtype'].__name__}")
 
 
 class HandDetector:
