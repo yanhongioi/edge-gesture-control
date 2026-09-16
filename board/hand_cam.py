@@ -452,7 +452,8 @@ def main():
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--fps", type=int, default=30)
     ap.add_argument("--mirror", action="store_true", help="左右翻轉畫面 (像照鏡子)")
-    ap.add_argument("--det-thresh", type=float, default=0.5, help="手部偵測分數門檻")
+    ap.add_argument("--det-thresh", type=float, default=0.55,
+                    help="hand detection score threshold (the model outputs junk boxes at exactly 0.50 when there is no hand)")
     ap.add_argument("--lmk-thresh", type=float, default=0.7, help="手骨信心分數門檻")
     ap.add_argument("--max-hands", type=int, default=1, help="每幀最多處理幾隻手 (每多一隻多一次推論)")
     ap.add_argument("--hand-candidates", type=int, default=2,
