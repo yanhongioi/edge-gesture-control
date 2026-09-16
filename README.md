@@ -16,6 +16,7 @@
 edge-gesture-control/
 ├── board/                    # 跑在 FRDM-i.MX93 上（整個資料夾 scp 到板子）
 │   ├── hand_cam.py           # C270 → 手部偵測 + 21 點骨架 → HTTP 串流 / HDMI / MQTT
+│   ├── bringup.sh            # 開機後一行設定好網路（USB 直連 + Wi-Fi）
 │   ├── usb_net.sh            # 把 USB1_C 設成 USB 網卡，讓筆電直連 (192.168.7.2)
 │   ├── models/               # 手部模型（原始 + Vela 編譯版 + Vela 報告）
 │   └── test_images/          # 單張圖片測試用
@@ -128,13 +129,22 @@ python3 hand_cam.py            # NPU 推論 + 串流
 
 ### 板子重開機後要重做的事
 
-在序列埠輸入，一次貼一行。
+1. 先打開手機熱點（要讓板子上網時才需要），USB 線保持接著，筆電這邊不用做任何設定。
+2. 在序列埠（COM11）登入 `root`，輸入**這一行**：
+   ```bash
+   sh /root/edge-gesture-control/board/bringup.sh
+   ```
+   正常的輸出如下：
+   ```text
+   mode=ncm iface=usb0 ip=192.168.7.2/24 udc=ci_hdrc.0 state=configured
+   wifi: 10.x.x.x/xx
+   net : internet OK
+   ```
+3. 在筆電執行 `ssh root@192.168.7.2`，就可以開始工作了。
 
+`bringup.sh` 做的事情等同於以下指令，腳本有問題時可以手動一行一行輸入：
 ```bash
-# USB 直連（每次都要做），做完就能 ssh root@192.168.7.2
 sh /root/edge-gesture-control/board/usb_net.sh
-
-# Wi-Fi（板子需要上網時才做，也可以在 USB SSH 裡執行）
 ip link set mlan0 up
 wpa_supplicant -B -i mlan0 -D nl80211 -c /etc/wpa_hotspot.conf
 udhcpc -i mlan0
