@@ -7,10 +7,22 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 CONF=/etc/wpa_hotspot.conf
 
 # --- USB 直連 ---
-if ip -4 addr show usb0 2>/dev/null | grep -q "192.168.7.2/"; then
-    echo "usb : already up (192.168.7.2)"
+UDC_STATE=/sys/class/udc/$(ls /sys/class/udc | head -n 1)/state
+if ip -4 addr show usb0 2>/dev/null | grep -q "192.168.7.2/" && [ "$(cat "$UDC_STATE")" = "configured" ]; then
+    echo "usb : already up (192.168.7.2, configured)"
 else
     sh "$DIR/usb_net.sh" || echo "usb : FAILED (see docs/setup.md 3-D)"
+    # 給筆電幾秒辨識
+    i=0
+    while [ $i -lt 8 ] && [ "$(cat "$UDC_STATE")" != "configured" ]; do sleep 1; i=$((i + 1)); done
+    st=$(cat "$UDC_STATE")
+    if [ "$st" = "configured" ]; then
+        echo "usb : OK, laptop connected (ssh root@192.168.7.2)"
+    else
+        echo "usb : laptop NOT connected (state=$st)."
+        echo "      Check the A-to-C cable: laptop USB-A <-> board USB1_C. Unplug/replug it, then run:"
+        echo "      cat $UDC_STATE    (should become 'configured')"
+    fi
 fi
 
 # --- Wi-Fi (只讓板子上網) ---
