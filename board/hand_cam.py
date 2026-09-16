@@ -25,6 +25,7 @@ import sys
 import glob
 import json
 import time
+import signal
 import argparse
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -522,8 +523,12 @@ def main():
     fps, last_print = 0.0, time.time()
     n_frames = n_cand = n_ok = n_tries = 0
     pres_sum = 0.0
+
+    # Ctrl+C 只設旗標，等這一幀跑完再結束；直接中斷會打斷 NPU 推論 (Failed to invoke ethos_u op)
+    stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
     try:
-        while True:
+        while not stop.is_set():
             t0 = time.perf_counter()
             ok, frame = cap.read()
             if not ok:
@@ -573,6 +578,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        print("結束")
         cap.release()
         if args.display:
             cv2.destroyAllWindows()
