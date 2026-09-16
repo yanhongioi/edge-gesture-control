@@ -11,6 +11,7 @@
 # 用法 (在板子上):
 #   python3 hand_cam.py                          # NPU + 串流到 :8080
 #   python3 hand_cam.py --display                # 另外顯示在板子 HDMI 螢幕
+#   python3 hand_cam.py --stream-scale 0.5 --stream-fps 10   # 網路慢時減輕串流
 #   python3 hand_cam.py --delegate cpu           # 用 CPU 跑 (跟 NPU 對照)
 #   python3 hand_cam.py --mqtt 192.168.10.1      # 21 點座標送到 PC, topic: edge/hand
 #   python3 hand_cam.py --image test_images/hand-1.jpg  # 單張圖片測試，結果存到 output/
@@ -190,9 +191,13 @@ class MjpegStreamer:
             b"<body style='margin:0;background:#111;display:flex;justify-content:center'>"
             b"<img src='/stream' style='max-width:100%;max-height:100vh'></body></html>")
 
-    def __init__(self, port):
+    def __init__(self, port, scale=1.0, quality=60, fps=15):
         self.jpeg = None
         self.cond = threading.Condition()
+        self.clients = 0
+        self.latest = None
+        self.new_frame = threading.Event()
+        self.scale, self.quality, self.period = scale, quality, 1.0 / fps
         streamer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -210,6 +215,7 @@ class MjpegStreamer:
                     self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
                     self.send_header("Cache-Control", "no-cache")
                     self.end_headers()
+                    streamer.clients += 1
                     try:
                         while True:
                             with streamer.cond:
@@ -220,20 +226,39 @@ class MjpegStreamer:
                                              b"\r\n\r\n" + jpg + b"\r\n")
                     except (BrokenPipeError, ConnectionResetError):
                         pass
+                    finally:
+                        streamer.clients -= 1
                 else:
                     self.send_error(404)
 
         self.server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
         self.server.daemon_threads = True
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
-        print(f"串流已開啟：在筆電瀏覽器打開 http://<板子IP>:{port}")
+        threading.Thread(target=self._encode_loop, daemon=True).start()
+        print(f"串流已開啟：在筆電瀏覽器打開 http://<板子IP>:{port} "
+              f"(scale {scale}, quality {quality}, max {fps} fps)")
 
     def push(self, frame):
-        ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 70])
-        if ok:
-            with self.cond:
-                self.jpeg = buf.tobytes()
-                self.cond.notify_all()
+        # 只交出最新一幀，JPEG 壓縮在另一個執行緒做，不拖慢推論；沒人看就不壓縮
+        if self.clients:
+            self.latest = frame
+            self.new_frame.set()
+
+    def _encode_loop(self):
+        while True:
+            self.new_frame.wait()
+            self.new_frame.clear()
+            t0 = time.perf_counter()
+            frame = self.latest
+            if self.scale != 1.0:
+                frame = cv2.resize(frame, None, fx=self.scale, fy=self.scale,
+                                   interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+            if ok:
+                with self.cond:
+                    self.jpeg = buf.tobytes()
+                    self.cond.notify_all()
+            time.sleep(max(0.0, self.period - (time.perf_counter() - t0)))
 
 
 def setup_wayland():
@@ -328,6 +353,9 @@ def main():
     ap.add_argument("--lmk-thresh", type=float, default=0.7, help="手骨信心分數門檻")
     ap.add_argument("--max-hands", type=int, default=1, help="每幀最多處理幾隻手 (每多一隻多一次推論)")
     ap.add_argument("--port", type=int, default=8080, help="HTTP 串流埠，0 = 不開")
+    ap.add_argument("--stream-scale", type=float, default=1.0, help="串流畫面縮放，例如 0.5 = 320x240")
+    ap.add_argument("--stream-quality", type=int, default=60, help="串流 JPEG 畫質 1~100")
+    ap.add_argument("--stream-fps", type=float, default=15, help="串流最高幀率 (不影響推論)")
     ap.add_argument("--display", action="store_true", help="在板子 HDMI 螢幕上顯示")
     ap.add_argument("--mqtt", default="", help="MQTT broker IP，例如 192.168.10.1")
     ap.add_argument("--mqtt-topic", default="edge/hand")
@@ -370,7 +398,8 @@ def main():
     if cap is None:
         sys.exit(f"無法開啟鏡頭 {dev}")
 
-    streamer = MjpegStreamer(args.port) if args.port else None
+    streamer = (MjpegStreamer(args.port, args.stream_scale, args.stream_quality, args.stream_fps)
+                if args.port else None)
     mqtt_pub = MqttPublisher(args.mqtt, args.mqtt_topic, args.mqtt_hz) if args.mqtt else None
     if args.display:
         setup_wayland()
