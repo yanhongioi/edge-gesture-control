@@ -7,3 +7,4 @@ venv/
 *.log
 .env
 board/output/
+*_hand_cam.jpg
