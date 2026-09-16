@@ -38,14 +38,14 @@ edge-gesture-control/
 ## 快速開始
 
 ```powershell
-# 1. 筆電：把 board/ 複製到板子（筆電 192.168.10.1 ↔ 板子 192.168.10.2）
-.\scripts\deploy_board.ps1
+# 1. 筆電：把 board/ 複製到板子（網路線：板子 192.168.10.2；熱點：見 docs/board_info.md）
+.\scripts\deploy_board.ps1 -BoardIp <板子IP>   # 熱點的 IP 見 docs/board_info.md
 
-# 2. 板子（ssh root@192.168.10.2）
+# 2. 板子（ssh root@<板子IP>）
 cd /root/edge-gesture-control/board
 python3 hand_cam.py            # NPU 推論 + 串流
 
-# 3. 筆電瀏覽器打開 http://192.168.10.2:8080
+# 3. 筆電瀏覽器打開 http://<板子IP>:8080
 ```
 
 詳細步驟與疑難排解：[docs/01_手部骨架上板教學.md](docs/01_手部骨架上板教學.md)
