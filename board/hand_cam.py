@@ -395,23 +395,29 @@ def process(frame, detector, landmark, person, args):
         person.draw(frame)
     boxes, _, scores, det_ms = detector(rgb)
 
+    # 手部偵測常常給出「不是手」的高分框，所以依分數由高到低，最多試 --hand-candidates 個框，
+    # 讓骨架模型判斷哪個才是手；找到 --max-hands 隻就停，所以第一個框就是手時不會多花時間
     hands, lmk_ms, tried, presences = [], 0.0, 0, []
     for box, score in sorted(zip(boxes, scores), key=lambda t: -t[1]):
-        if score < args.det_thresh or tried >= args.max_hands:
+        if score < args.det_thresh or len(hands) >= args.max_hands or tried >= args.hand_candidates:
             break
         x0, y0, x1, y1 = expand_box(box, fw, fh)
         if x1 - x0 < 8 or y1 - y0 < 8:
             continue
         tried += 1
-        cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 200, 255), 2)
 
         pts, presence, ms = landmark(rgb[y0:y1, x0:x1])
         lmk_ms += ms
         presences.append(presence)
         ok = presence >= args.lmk_thresh
-        cv2.putText(frame, f"hand {score:.2f}  lmk {presence:.2f}", (x0, max(14, y0 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 0) if ok else (0, 0, 255), 2)
-        if not ok:
+        if ok:
+            cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 200, 255), 2)
+            cv2.putText(frame, f"hand {score:.2f}  lmk {presence:.2f}", (x0, max(14, y0 - 6)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 0), 2)
+        else:   # 被骨架模型否決的候選框：細紅框
+            cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 0, 255), 1)
+            cv2.putText(frame, f"{score:.2f}/{presence:.2f}", (x0 + 2, y1 - 4),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 0, 255), 1)
             continue
         sx, sy = (x1 - x0) / landmark.w, (y1 - y0) / landmark.h
         px = [x0 + int(p[0] * sx) for p in pts]
@@ -449,6 +455,8 @@ def main():
     ap.add_argument("--det-thresh", type=float, default=0.5, help="手部偵測分數門檻")
     ap.add_argument("--lmk-thresh", type=float, default=0.7, help="手骨信心分數門檻")
     ap.add_argument("--max-hands", type=int, default=1, help="每幀最多處理幾隻手 (每多一隻多一次推論)")
+    ap.add_argument("--hand-candidates", type=int, default=2,
+                    help="每幀最多拿幾個手部偵測框給骨架模型確認 (前面的框被否決才會試下一個)")
     ap.add_argument("--port", type=int, default=8080, help="HTTP 串流埠，0 = 不開")
     ap.add_argument("--stream-scale", type=float, default=1.0, help="串流畫面縮放，例如 0.5 = 320x240")
     ap.add_argument("--stream-quality", type=int, default=60, help="串流 JPEG 畫質 1~100")
@@ -511,7 +519,7 @@ def main():
         print("注意：沒開串流/顯示/MQTT，只會在終端機印 FPS")
 
     fps, last_print = 0.0, time.time()
-    n_frames = n_cand = n_ok = 0
+    n_frames = n_cand = n_ok = n_tries = 0
     pres_sum = 0.0
     try:
         while True:
@@ -528,6 +536,7 @@ def main():
                                                                     person, args)
 
             n_frames += 1
+            n_tries += len(process.last_presences)
             if process.last_presences:
                 n_cand += 1
                 pres_sum += max(process.last_presences)
@@ -554,11 +563,11 @@ def main():
                     break
             if args.verbose or time.time() - last_print > 2:
                 ptxt = f"  person dx={person_info['dx']:+.2f}" if person_info else "  person -"
-                stat = (f"  | cand {100 * n_cand / n_frames:3.0f}%  ok {100 * n_ok / n_frames:3.0f}%"
-                        f"  lmk-avg {pres_sum / n_cand if n_cand else 0:.2f}")
+                stat = (f"  | ok {100 * n_ok / n_frames:3.0f}%  lmk-best {pres_sum / n_cand if n_cand else 0:.2f}"
+                        f"  tries {n_tries / n_frames:.1f}/frame")
                 print(info + f"  hands={len(hands)}" + (ptxt if person is not None else "") + stat)
                 last_print = time.time()
-                n_frames = n_cand = n_ok = 0
+                n_frames = n_cand = n_ok = n_tries = 0
                 pres_sum = 0.0
     except KeyboardInterrupt:
         pass
