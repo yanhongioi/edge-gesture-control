@@ -395,7 +395,7 @@ def process(frame, detector, landmark, person, args):
         person.draw(frame)
     boxes, _, scores, det_ms = detector(rgb)
 
-    hands, lmk_ms, tried = [], 0.0, 0
+    hands, lmk_ms, tried, presences = [], 0.0, 0, []
     for box, score in sorted(zip(boxes, scores), key=lambda t: -t[1]):
         if score < args.det_thresh or tried >= args.max_hands:
             break
@@ -404,12 +404,14 @@ def process(frame, detector, landmark, person, args):
             continue
         tried += 1
         cv2.rectangle(frame, (x0, y0), (x1, y1), (0, 200, 255), 2)
-        cv2.putText(frame, f"hand {score:.2f}", (x0, max(12, y0 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
 
         pts, presence, ms = landmark(rgb[y0:y1, x0:x1])
         lmk_ms += ms
-        if presence < args.lmk_thresh:
+        presences.append(presence)
+        ok = presence >= args.lmk_thresh
+        cv2.putText(frame, f"hand {score:.2f}  lmk {presence:.2f}", (x0, max(14, y0 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 220, 0) if ok else (0, 0, 255), 2)
+        if not ok:
             continue
         sx, sy = (x1 - x0) / landmark.w, (y1 - y0) / landmark.h
         px = [x0 + int(p[0] * sx) for p in pts]
@@ -423,6 +425,7 @@ def process(frame, detector, landmark, person, args):
                           for i in range(21)],
         })
     person_info = person.as_dict(fw, fh) if person is not None else None
+    process.last_presences = presences      # 給主迴圈做統計
     return hands, person_info, (det_ms, lmk_ms, person_ms)
 
 
@@ -508,6 +511,8 @@ def main():
         print("注意：沒開串流/顯示/MQTT，只會在終端機印 FPS")
 
     fps, last_print = 0.0, time.time()
+    n_frames = n_cand = n_ok = 0
+    pres_sum = 0.0
     try:
         while True:
             t0 = time.perf_counter()
@@ -521,6 +526,13 @@ def main():
 
             hands, person_info, (det_ms, lmk_ms, per_ms) = process(frame, detector, landmark,
                                                                     person, args)
+
+            n_frames += 1
+            if process.last_presences:
+                n_cand += 1
+                pres_sum += max(process.last_presences)
+            if hands:
+                n_ok += 1
 
             dt = time.perf_counter() - t0
             fps = 0.9 * fps + 0.1 * (1.0 / dt) if fps else 1.0 / dt
@@ -542,13 +554,18 @@ def main():
                     break
             if args.verbose or time.time() - last_print > 2:
                 ptxt = f"  person dx={person_info['dx']:+.2f}" if person_info else "  person -"
-                print(info + f"  hands={len(hands)}" + (ptxt if person is not None else ""))
+                stat = (f"  | cand {100 * n_cand / n_frames:3.0f}%  ok {100 * n_ok / n_frames:3.0f}%"
+                        f"  lmk-avg {pres_sum / n_cand if n_cand else 0:.2f}")
+                print(info + f"  hands={len(hands)}" + (ptxt if person is not None else "") + stat)
                 last_print = time.time()
+                n_frames = n_cand = n_ok = 0
+                pres_sum = 0.0
     except KeyboardInterrupt:
         pass
     finally:
         cap.release()
-        cv2.destroyAllWindows()
+        if args.display:
+            cv2.destroyAllWindows()
 
 
 if __name__ == "__main__":
