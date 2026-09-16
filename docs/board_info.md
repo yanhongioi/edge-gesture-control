@@ -1,0 +1,102 @@
+# 板子資訊與進度紀錄
+
+我們這塊 FRDM-i.MX93 的實際狀態。有變動就更新這份文件。操作步驟請見 [01_手部骨架上板教學.md](01_手部骨架上板教學.md)。
+
+最後更新：2026-09-16
+
+---
+
+## 系統
+
+| 項目 | 值 |
+| --- | --- |
+| hostname | `imx93-11x11-lpddr4x-frdm` |
+| Kernel | `6.18.2-1.0.0-gf49f45233f7b`（aarch64，2026-02-11 build） |
+| 發行版 | NXP i.MX Release Distro `6.18-whinlatter`（`ID=fsl-imx-xwayland`） |
+| 登入 | `root`，無密碼（序列埠和 SSH 都可以） |
+| 記憶體 | 1.9 GiB（開機後可用約 1.7 GiB），無 swap |
+| 儲存空間 | `/` 共 8.2 G，已用 4.9 G，剩餘 2.9 G |
+
+## AI / 軟體環境
+
+| 項目 | 狀態 |
+| --- | --- |
+| NPU 裝置 | `/dev/ethosu0` ✅ |
+| NPU delegate | `/usr/lib/libethosu_delegate.so` ✅ |
+| `tflite_runtime` | ✅ |
+| `ai_edge_litert` | ✅ |
+| OpenCV (python3) | 4.12.0 ✅ |
+| `paho-mqtt` | ❌ 未安裝（不是官方的 MQTT image）→ 要用 MQTT 時需要另外安裝 |
+| 官方手部範例 | `/root/hand-demo/`（`app.py`、`model/`（8 個模型）、`img/`、`output/`），與 WPI 原版 MobileNetSSD_HandAndSKeletonDetect 相同 |
+
+## 周邊與介面
+
+| 介面 | 名稱 / 節點 | 備註 |
+| --- | --- | --- |
+| C270 鏡頭 | **`/dev/video2`**（影像）、`/dev/video3`（metadata，不能讀影像）、`/dev/media0` | 插在板子的 USB-A 孔，`usb-ci_hdrc.1-1` |
+| 板上 MIPI 鏡頭介面 | `/dev/video0`、`/dev/video1`（`mxc-isi-cap`） | 沒有使用 |
+| 有線網路 | `eth0`、`eth1` | 目前沒接網路線 |
+| Wi-Fi | `mlan0`（MAC `80:a1:97:50:49:91`） | 開機就有，不需要 `modprobe` |
+| Wi-Fi AP / Direct | `uap0`、`wfd0` | 沒有使用 |
+| CAN | `can0` | 沒有使用 |
+
+## 接線（目前）
+
+| 板子的孔 | 接到 | 用途 |
+| --- | --- | --- |
+| DEBUG（USB-C） | 筆電 | 序列埠：**COM11 (A) = Linux 主控台**，COM12 (B) 沒有使用 |
+| POWER（USB-C） | 筆電 USB-C | 供電。接上 C270 後目前沒有重開機；demo 前要改用充電器 |
+| USB-A | C270 | 鏡頭 |
+| `USB1_C` | （空） | USB 資料孔，燒錄或 USB 網路時才用 |
+| RJ45 × 2、HDMI | （空） | 目前沒有網路線和 HDMI 線 |
+
+序列埠設定：VS Code Serial Monitor、115200、8N1，並切換到 Terminal Mode。
+**Serial Monitor 貼上多行指令會亂掉，要一次貼一行。**
+
+## 網路（目前用手機熱點）
+
+| 項目 | 值 |
+| --- | --- |
+| 方式 | 板子和筆電都連手機熱點（2.4 GHz、WPA2-PSK） |
+| 板子設定檔 | `/etc/wpa_hotspot.conf`（熱點名稱和密碼只存在板子上，不放進 repo） |
+| 板子 IP | `10.52.95.226`（DHCP，**會變**） |
+| 筆電 IP | `10.52.95.205`（DHCP，**會變**） |
+| 筆電 ↔ 板子延遲 | ping 61～446 ms（熱點延遲大，串流可能卡） |
+| SSH | `ssh root@10.52.95.226`，免密碼 ✅ |
+
+**板子重開機後，要在序列埠重新執行下列指令**（設定檔還在，不用重寫）：
+
+```bash
+ip link set mlan0 up
+wpa_supplicant -B -i mlan0 -D nl80211 -c /etc/wpa_hotspot.conf
+udhcpc -i mlan0
+ip addr show mlan0          # 看新的 IP
+```
+
+- 出現 `rfkill: Cannot open RFKILL control device` 可以忽略。
+- 待辦：改成開機自動連線。
+
+---
+
+## 進度
+
+- [x] 序列埠登入（COM11）
+- [x] 檢查系統、NPU、Python 環境、既有模型
+- [x] C270 辨識為 `/dev/video2`
+- [x] 板子透過手機熱點上網、取得 IP
+- [x] 筆電 ping 得到板子、SSH 登入成功
+- [ ] VS Code Remote-SSH
+- [ ] 把 `board/` 部署到板子
+- [ ] 用 `benchmark_model` 量 NPU / CPU 推論時間 → 填到下表
+- [ ] 單張圖片測試（`hand_cam.py --image`）
+- [ ] 即時鏡頭 + 瀏覽器看骨架 → 記錄 FPS
+- [ ] MQTT（需要先安裝 paho-mqtt）
+- [ ] 改用充電器供電、Wi-Fi 開機自動連線
+
+## 效能紀錄
+
+| 模型 | NPU (vela) | CPU |
+| --- | --- | --- |
+| hand_detect_20000_quant | | |
+| hand_landmark_new_256x256_integer_quant | | |
+| `hand_cam.py` 即時 FPS | | |

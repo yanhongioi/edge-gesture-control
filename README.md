@@ -20,6 +20,7 @@ edge-gesture-control/
 │   └── deploy_board.ps1      # 一鍵把 board/ 複製到板子
 ├── docs/
 │   ├── 01_手部骨架上板教學.md  # 接線、看板子資訊、跑模型、看畫面（從這裡開始）
+│   ├── board_info.md         # 我們這塊板子的實際資訊、IP、進度、效能紀錄
 │   └── plan_v3.md            # 專案構想
 └── third_party/              # 第三方授權
 ```
