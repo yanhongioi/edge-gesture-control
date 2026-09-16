@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 # --------------------------------------------------------------------------------------
-# i.MX93 FRDM : 手部偵測 + 21 點手骨架 (Logitech C270)
+# i.MX93 FRDM : 手部偵測 + 21 點手骨架 + 人物定位 (Logitech C270)
 # 改寫自 MobileNetSSD_HandAndSKeletonDetect/app.py (WPI, Weilly Li, Apache-2.0)，修正/新增：
 #   * 預設用 i.MX93 的 NPU (Ethos-U, libethosu_delegate.so)，app.py 預設的 vx 是 i.MX8MP 用的
 #   * 自動尋找 C270 的 /dev/videoX，不再寫死 /dev/video3
 #   * 鏡頭畫面轉 RGB 再送進模型 (OpenCV 讀進來是 BGR)
 #   * 內建 HTTP MJPEG 串流 -> 筆電瀏覽器開 http://<板子IP>:8080 就能看到畫面+骨架
 #   * 可選：板子 HDMI 螢幕顯示 (--display)、MQTT 送出 21 點座標 (--mqtt)
+#   * 人物定位：每 N 幀跑一次人物偵測 (MobileNetSSD_VehicleHumanDetector)，標出人的中心點
+#     和偏離畫面中央的量 dx，給之後的雲台用
 #
 # 用法 (在板子上):
 #   python3 hand_cam.py                          # NPU + 串流到 :8080
 #   python3 hand_cam.py --display                # 另外顯示在板子 HDMI 螢幕
 #   python3 hand_cam.py --stream-scale 0.5 --stream-fps 10   # 網路慢時減輕串流
 #   python3 hand_cam.py --delegate cpu           # 用 CPU 跑 (跟 NPU 對照)
-#   python3 hand_cam.py --mqtt 192.168.10.1      # 21 點座標送到 PC, topic: edge/hand
+#   python3 hand_cam.py --mqtt 192.168.7.1       # 21 點座標送到 PC, topic: edge/hand
+#   python3 hand_cam.py --person-every 10        # 人物偵測每 10 幀跑一次 (0 = 關閉)
 #   python3 hand_cam.py --image test_images/hand-1.jpg  # 單張圖片測試，結果存到 output/
 # --------------------------------------------------------------------------------------
 
@@ -74,10 +77,11 @@ def describe(name, interp):
         print(f"  out{i}: {d['name']:<44} shape={[int(x) for x in d['shape']]} dtype={d['dtype'].__name__}")
 
 
-class HandDetector:
-    """MobileNet-SSD 手部偵測 (輸出為 TFLite_Detection_PostProcess：boxes/classes/scores/num)"""
+class SsdDetector:
+    """MobileNet-SSD 偵測 (輸出為 TFLite_Detection_PostProcess：boxes/classes/scores/num)
+    手部偵測和人物偵測共用"""
 
-    def __init__(self, path, delegate):
+    def __init__(self, path, delegate, name):
         self.interp = make_interpreter(path, delegate)
         self.interp.allocate_tensors()
         inp = self.interp.get_input_details()[0]
@@ -85,9 +89,9 @@ class HandDetector:
         self.in_dtype = inp["dtype"]
         self.h, self.w = int(inp["shape"][1]), int(inp["shape"][2])
         outs = self.interp.get_output_details()
-        self.out_boxes, self.out_scores, self.out_num = (outs[0]["index"], outs[2]["index"],
-                                                         outs[3]["index"])
-        describe("hand detect: " + os.path.basename(path), self.interp)
+        self.out_boxes, self.out_classes, self.out_scores, self.out_num = (
+            outs[0]["index"], outs[1]["index"], outs[2]["index"], outs[3]["index"])
+        describe(name + ": " + os.path.basename(path), self.interp)
 
     def __call__(self, rgb):
         img = cv2.resize(rgb, (self.w, self.h)).astype(self.in_dtype)
@@ -96,9 +100,10 @@ class HandDetector:
         self.interp.invoke()
         ms = (time.perf_counter() - t0) * 1000
         boxes = self.interp.get_tensor(self.out_boxes)[0]     # [N,4] = ymin,xmin,ymax,xmax (0~1)
+        classes = self.interp.get_tensor(self.out_classes)[0]
         scores = self.interp.get_tensor(self.out_scores)[0]
         num = int(self.interp.get_tensor(self.out_num).reshape(-1)[0])
-        return boxes[:num], scores[:num], ms
+        return boxes[:num], classes[:num], scores[:num], ms
 
 
 class HandLandmark:
@@ -136,6 +141,85 @@ def expand_box(box, fw, fh):
     x0, y0 = max(0, int(round(x0))), max(0, int(round(y0)))
     x1, y1 = min(fw, int(round(x1))), min(fh, int(round(y1)))
     return x0, y0, x1, y1
+
+
+PERSON_CLASS = 0      # COCO label: 0 = person
+
+
+class PersonLocator:
+    """每 N 幀跑一次人物偵測，記住畫面中最大的人 (通常就是使用者)。
+    dx / dy = 人物中心偏離畫面中央的量，-1~+1，正值 = 人在畫面右 / 下方。
+    之後的雲台就是要把 dx 拉回 0。注意：用 --mirror 時畫面已左右翻轉，雲台方向要跟著反過來。"""
+
+    def __init__(self, detector, every, thresh):
+        self.detector, self.every, self.thresh = detector, max(1, every), thresh
+        self.frame = 0
+        self.box = None           # (x0, y0, x1, y1) 像素
+        self.score = 0.0
+        self.age = 0              # 距離上次偵測到人過了幾幀
+        self.ms = 0.0             # 最近一次推論時間
+        self.lost_after = self.every * 3
+
+    def update(self, rgb):
+        """需要時跑一次偵測；回傳這一幀有沒有跑"""
+        ran = self.frame % self.every == 0
+        self.frame += 1
+        self.age += 1
+        if ran:
+            fh, fw = rgb.shape[:2]
+            boxes, classes, scores, self.ms = self.detector(rgb)
+            best = None
+            for b, c, sc in zip(boxes, classes, scores):
+                if int(c) != PERSON_CLASS or sc < self.thresh:
+                    continue
+                x0, y0 = max(0, int(b[1] * fw)), max(0, int(b[0] * fh))
+                x1, y1 = min(fw, int(b[3] * fw)), min(fh, int(b[2] * fh))
+                area = (x1 - x0) * (y1 - y0)
+                if best is None or area > best[0]:
+                    best = (area, (x0, y0, x1, y1), float(sc))
+            if best:
+                _, self.box, self.score = best
+                self.age = 0
+        if self.box is not None and self.age > self.lost_after:
+            self.box = None
+        return ran
+
+    def center(self):
+        x0, y0, x1, y1 = self.box
+        return (x0 + x1) / 2, (y0 + y1) / 2
+
+    def offset(self, fw, fh):
+        cx, cy = self.center()
+        return (cx - fw / 2) / (fw / 2), (cy - fh / 2) / (fh / 2)
+
+    def draw(self, frame):
+        fh, fw = frame.shape[:2]
+        mx, my = fw // 2, fh // 2
+        cv2.line(frame, (mx - 15, my), (mx + 15, my), (220, 220, 220), 1)     # 畫面中央十字
+        cv2.line(frame, (mx, my - 15), (mx, my + 15), (220, 220, 220), 1)
+        if self.box is None:
+            cv2.putText(frame, "no person", (8, fh - 12), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            return
+        x0, y0, x1, y1 = self.box
+        cx, cy = (int(v) for v in self.center())
+        dx, dy = self.offset(fw, fh)
+        color = (255, 140, 0) if self.age < self.every else (160, 160, 160)  # 灰色 = 最近沒更新到
+        cv2.rectangle(frame, (x0, y0), (x1, y1), color, 2)
+        cv2.circle(frame, (cx, cy), 7, color, -1)
+        cv2.line(frame, (mx, cy), (cx, cy), color, 2)                           # 水平偏移
+        cv2.putText(frame, f"person {self.score:.2f}  dx {dx:+.2f}", (x0 + 4, y0 + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+
+    def as_dict(self, fw, fh):
+        if self.box is None:
+            return None
+        x0, y0, x1, y1 = self.box
+        cx, cy = self.center()
+        dx, dy = self.offset(fw, fh)
+        return {"score": round(self.score, 3),
+                "box": [round(x0 / fw, 4), round(y0 / fh, 4), round(x1 / fw, 4), round(y1 / fh, 4)],
+                "center": [round(cx / fw, 4), round(cy / fh, 4)],
+                "dx": round(dx, 4), "dy": round(dy, 4), "age": self.age}
 
 
 # --------------------------------------------------------------------------------------
@@ -299,11 +383,17 @@ def draw_hand(frame, px, py):
         cv2.circle(frame, (px[i], py[i]), 4, color, -1)
 
 
-def process(frame, detector, landmark, args):
-    """在 frame 上畫出結果，回傳 (hands, (det_ms, lmk_ms))；座標皆為 0~1 正規化"""
+def process(frame, detector, landmark, person, args):
+    """在 frame 上畫出結果，回傳 (hands, person_info, (det_ms, lmk_ms, person_ms))；
+    座標皆為 0~1 正規化；person_ms 在這一幀沒跑人物偵測時為 0"""
     fh, fw = frame.shape[:2]
     rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    boxes, scores, det_ms = detector(rgb)
+    person_ms = 0.0
+    if person is not None:
+        if person.update(rgb):
+            person_ms = person.ms
+        person.draw(frame)
+    boxes, _, scores, det_ms = detector(rgb)
 
     hands, lmk_ms, tried = [], 0.0, 0
     for box, score in sorted(zip(boxes, scores), key=lambda t: -t[1]):
@@ -332,7 +422,8 @@ def process(frame, detector, landmark, args):
             "landmarks": [[round(px[i] / fw, 4), round(py[i] / fh, 4), round(float(pts[i][2]), 2)]
                           for i in range(21)],
         })
-    return hands, (det_ms, lmk_ms)
+    person_info = person.as_dict(fw, fh) if person is not None else None
+    return hands, person_info, (det_ms, lmk_ms, person_ms)
 
 
 # --------------------------------------------------------------------------------------
@@ -344,6 +435,9 @@ def main():
     ap.add_argument("--model", default=os.path.join(HERE, "models/hand_detect_20000_quant.tflite"))
     ap.add_argument("--model-landmark",
                     default=os.path.join(HERE, "models/hand_landmark_new_256x256_integer_quant.tflite"))
+    ap.add_argument("--model-person", default=os.path.join(HERE, "models/detect_ssdmobilenetv3_quant.tflite"))
+    ap.add_argument("--person-every", type=int, default=5, help="人物偵測每幾幀跑一次，0 = 關閉")
+    ap.add_argument("--person-thresh", type=float, default=0.5, help="人物偵測分數門檻")
     ap.add_argument("--device", default="", help="例如 /dev/video0；不給就自動找 C270")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
@@ -364,29 +458,36 @@ def main():
     ap.add_argument("--verbose", action="store_true", help="每幀印出推論時間")
     args = ap.parse_args()
 
-    det_path, lmk_path = args.model, args.model_landmark
+    det_path, lmk_path, per_path = args.model, args.model_landmark, args.model_person
     if args.delegate == "npu":
-        det_path, lmk_path = to_vela_path(det_path), to_vela_path(lmk_path)
+        det_path, lmk_path, per_path = (to_vela_path(det_path), to_vela_path(lmk_path),
+                                        to_vela_path(per_path))
         if not os.path.exists(ETHOSU_DELEGATE):
             sys.exit(f"找不到 {ETHOSU_DELEGATE}，這台不是 i.MX93？請改用 --delegate cpu")
-    for p in (det_path, lmk_path):
+    for p in (det_path, lmk_path) + ((per_path,) if args.person_every > 0 else ()):
         if not os.path.exists(p):
             sys.exit(f"找不到模型檔: {p}")
     print(f"delegate = {args.delegate}")
-    detector = HandDetector(det_path, args.delegate)
+    detector = SsdDetector(det_path, args.delegate, "hand detect")
     landmark = HandLandmark(lmk_path, args.delegate)
+    person = None
+    if args.person_every > 0:
+        person = PersonLocator(SsdDetector(per_path, args.delegate, "person detect"),
+                               args.person_every, args.person_thresh)
 
     # 單張圖片測試
     if args.image:
         frame = cv2.imread(args.image)
         if frame is None:
             sys.exit(f"讀不到圖片: {args.image}")
-        hands, (det_ms, lmk_ms) = process(frame, detector, landmark, args)
+        hands, person_info, (det_ms, lmk_ms, per_ms) = process(frame, detector, landmark, person, args)
         os.makedirs(os.path.join(HERE, "output"), exist_ok=True)
         out = os.path.join(HERE, "output",
                            os.path.splitext(os.path.basename(args.image))[0] + "_hand_cam.jpg")
         cv2.imwrite(out, frame)
-        print(f"det {det_ms:.1f} ms, lmk {lmk_ms:.1f} ms, 偵測到 {len(hands)} 隻手，結果存到 {out}")
+        print(f"det {det_ms:.1f} ms, lmk {lmk_ms:.1f} ms, person {per_ms:.1f} ms, "
+              f"偵測到 {len(hands)} 隻手，結果存到 {out}")
+        print("person:", json.dumps(person_info))
         for h in hands:
             print(json.dumps(h))
         return
@@ -418,11 +519,14 @@ def main():
             if args.mirror:
                 frame = cv2.flip(frame, 1)
 
-            hands, (det_ms, lmk_ms) = process(frame, detector, landmark, args)
+            hands, person_info, (det_ms, lmk_ms, per_ms) = process(frame, detector, landmark,
+                                                                    person, args)
 
             dt = time.perf_counter() - t0
             fps = 0.9 * fps + 0.1 * (1.0 / dt) if fps else 1.0 / dt
-            info = f"{args.delegate.upper()}  FPS {fps:4.1f}  det {det_ms:5.1f}ms  lmk {lmk_ms:5.1f}ms"
+            info = f"{args.delegate.upper()}  FPS {fps:4.1f}  det {det_ms:4.1f}  lmk {lmk_ms:4.1f}"
+            if person is not None:
+                info += f"  per {person.ms:4.1f}/{person.every}f"
             cv2.putText(frame, info, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
             cv2.putText(frame, info, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
 
@@ -431,13 +535,14 @@ def main():
             if mqtt_pub:
                 mqtt_pub.publish({"ts": time.time(), "fps": round(fps, 1),
                                   "width": frame.shape[1], "height": frame.shape[0],
-                                  "hands": hands})
+                                  "hands": hands, "person": person_info})
             if args.display:
                 cv2.imshow("i.MX93 Hand Skeleton", frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
             if args.verbose or time.time() - last_print > 2:
-                print(info + f"  hands={len(hands)}")
+                ptxt = f"  person dx={person_info['dx']:+.2f}" if person_info else "  person -"
+                print(info + f"  hands={len(hands)}" + (ptxt if person is not None else ""))
                 last_print = time.time()
     except KeyboardInterrupt:
         pass

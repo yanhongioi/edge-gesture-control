@@ -15,10 +15,10 @@
 ```text
 edge-gesture-control/
 ├── board/                    # 跑在 FRDM-i.MX93 上（整個資料夾 scp 到板子）
-│   ├── hand_cam.py           # C270 → 手部偵測 + 21 點骨架 → HTTP 串流 / HDMI / MQTT
+│   ├── hand_cam.py           # C270 → 手部偵測 + 21 點骨架 + 人物定位 → HTTP 串流 / HDMI / MQTT
 │   ├── bringup.sh            # 開機後一行設定好網路（USB 直連 + Wi-Fi）
 │   ├── usb_net.sh            # 把 USB1_C 設成 USB 網卡，讓筆電直連 (192.168.7.2)
-│   ├── models/               # 手部模型（原始 + Vela 編譯版 + Vela 報告）
+│   ├── models/               # 手部、人物模型（原始 + Vela 編譯版 + Vela 報告）
 │   └── test_images/          # 單張圖片測試用
 ├── pc/                       # 跑在 Windows 筆電
 │   ├── hand_listener.py      # 接收板子送來的 21 點座標 (MQTT edge/hand)
@@ -180,6 +180,7 @@ udhcpc -i mlan0
 
 **主線（進行中）**：MQTT 打通 → 手勢分類 → PC 控制 → 防誤觸 / 回饋音
 
+- [x] 人物定位：每 5 幀跑一次人物偵測，挑畫面中最大的人，標出中心點和偏離畫面中央的量 `dx`（PC 測試通過，**待上板量速度**）
 - [ ] 手部追蹤：追到手之後，用上一幀的骨架範圍當裁切框、只跑骨架模型，跟丟了才跑 `hand_detect`（MediaPipe 的做法，NPU 每幀約 22 ms → 12 ms）
 - [ ] 手勢分類（從 21 個點判斷手勢）
 - [ ] PC 控制原語（捲動、快捷鍵），收到手勢就執行
@@ -187,7 +188,7 @@ udhcpc -i mlan0
 
 **之後再做**
 
-- [ ] 雲台持續追人。設計（2026-09-17 決定）：
+- [ ] 雲台持續追人（人物定位已完成，剩下舵機控制：把 `dx` 拉回 0）。設計（2026-09-17 決定）：
   - **人物偵測**：`MobileNetSSD_VehicleHumanDetector` 的 `detect_ssdmobilenetv3_quant`（COCO，`person` 是第 0 類，300×300，NPU 98.4%）。正面、側面、背面都偵測得到，每 5～10 幀跑一次，用人物框中心的 x 算雲台要轉的角度，讓人保持在畫面中央。它的 `_vela` 檔要先用 `scripts/fix_vela_scratch.py` 修正。
   - **手勢**：在這個穩定的畫面裡持續跑（不是兩種模式切換）。三個模型輪流使用 NPU，各自的 SRAM 都在 384 KB 以內，不會衝突。
   - **游標座標**：改用「手相對於人物框」的位置，不受鏡頭轉動影響。
@@ -199,7 +200,8 @@ udhcpc -i mlan0
 | --- | --- | --- |
 | hand_detect_20000_quant | 9.8 ms（單張圖片、第一次推論，含暖機） | |
 | hand_landmark_new_256x256_integer_quant | 12.2 ms（同上） | |
-| `hand_cam.py` 即時（640×480，1 隻手） | 約 30 FPS（受限於鏡頭的 30 fps） | |
+| detect_ssdmobilenetv3_quant（人物） | 待測 | PC 上約 14～21 ms |
+| `hand_cam.py` 即時（640×480，1 隻手） | 約 30 FPS（受限於鏡頭的 30 fps；尚未加入人物偵測） | |
 
 NPU 分工：偵測模型的後處理（`TFLite_Detection_PostProcess`）在 CPU 上跑；骨架模型的輸入輸出量化轉換在 CPU 上跑；其餘都在 NPU。
 
@@ -220,11 +222,19 @@ NPU 分工：偵測模型的後處理（`TFLite_Detection_PostProcess`）在 CPU
 
 | topic | 方向 | 內容 |
 | --- | --- | --- |
-| `edge/hand` | 板子 → PC | `{"ts", "fps", "width", "height", "hands": [{"score", "presence", "box", "landmarks": [[x, y, z] × 21]}]}`，x/y 為 0~1 |
+| `edge/hand` | 板子 → PC | `{"ts", "fps", "width", "height", "hands": [...], "person": {...} 或 null}` |
+
+- `hands[]`：`{"score", "presence", "box": [x0, y0, x1, y1], "landmarks": [[x, y, z] × 21]}`
+- `person`：`{"score", "box", "center": [x, y], "dx", "dy", "age"}`
+  - `dx`、`dy`：人物中心偏離畫面中央的量，範圍 -1～+1，正值代表人在右方或下方。
+  - `age`：距離上次偵測到這個人過了幾幀。
+- 座標都是 0～1 的正規化值。
 
 ## 授權與來源
 
-`board/models/` 的模型，以及 `board/hand_cam.py` 的前後處理流程，改寫自 WPI（Weilly Li）的 i.MX 手部偵測範例 MobileNetSSD_HandAndSKeletonDetect（Code Ver 4.0，2023/04/26，Apache License 2.0，授權全文見 [third_party/MobileNetSSD_HandAndSKeletonDetect/LICENSE](third_party/MobileNetSSD_HandAndSKeletonDetect/LICENSE)）。
+**人物偵測**：`board/models/detect_ssdmobilenetv3_quant*.tflite` 來自 WPI 的 MobileNetSSD_VehicleHumanDetector（SSD MobileNetV3，COCO，Apache License 2.0，授權全文見 [third_party/MobileNetSSD_VehicleHumanDetector/LICENSE](third_party/MobileNetSSD_VehicleHumanDetector/LICENSE)）。它的 Vela 版一樣已經用 `scripts/fix_vela_scratch.py` 修正。
+
+**手部**：`board/models/` 的手部模型，以及 `board/hand_cam.py` 的前後處理流程，改寫自 WPI（Weilly Li）的 i.MX 手部偵測範例 MobileNetSSD_HandAndSKeletonDetect（Code Ver 4.0，2023/04/26，Apache License 2.0，授權全文見 [third_party/MobileNetSSD_HandAndSKeletonDetect/LICENSE](third_party/MobileNetSSD_HandAndSKeletonDetect/LICENSE)）。
 
 - 使用的模型：`hand_detect_20000_quant`（MobileNet-SSD 手部偵測）、`hand_landmark_new_256x256_integer_quant`（21 點手骨架），兩者都包含原始版和 Vela 版。Vela 版已修正，見已知問題。
 - 沒有收錄 `hand_landmark_quant`、`hand_landmark_mediapipe_quant`：根據 Vela 報告，這兩個模型沒有任何運算能放到 NPU 上。

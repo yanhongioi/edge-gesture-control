@@ -307,7 +307,7 @@ python3 hand_cam.py --image test_images/hand-1.jpg
 python3 hand_cam.py
 ```
 
-筆電瀏覽器打開 **http://192.168.7.2:8080**（USB 直連；網路線是 `http://192.168.10.2:8080`），就能看到鏡頭畫面、手部框（橘色）和骨架（綠線、藍點，指尖是紅點）。左上角會顯示 NPU/CPU、FPS 和兩個模型各自的推論時間。終端機每 2 秒也會印一次 FPS。
+筆電瀏覽器打開 **http://192.168.7.2:8080**（USB 直連；網路線是 `http://192.168.10.2:8080`），就能看到鏡頭畫面、手部框（黃色）、骨架（綠線、藍點，指尖是紅點），以及人物框（藍色，灰色代表最近沒更新到）、人物中心點、畫面中央十字和水平偏移 `dx`。左上角會顯示 NPU/CPU、FPS 和兩個模型各自的推論時間。終端機每 2 秒也會印一次 FPS。
 
 常用選項：
 
@@ -318,6 +318,7 @@ python3 hand_cam.py --mirror           # 左右翻轉，像照鏡子
 python3 hand_cam.py --device /dev/video2   # 自動找不到 C270 時手動指定
 python3 hand_cam.py --det-thresh 0.3   # 手比較遠、偵測不到時調低門檻
 python3 hand_cam.py --max-hands 2      # 同時追兩隻手（FPS 會下降）
+python3 hand_cam.py --person-every 10  # 人物偵測改成每 10 幀跑一次（預設 5；0 = 關閉）
 python3 hand_cam.py --port 0           # 不開串流（省下 JPEG 編碼的 CPU）
 python3 hand_cam.py --stream-scale 0.5 --stream-fps 10   # 網路慢（熱點）時減輕串流，不影響推論
 python3 hand_cam.py --stream-fps 30 --stream-quality 80  # USB 直連 / 網路線時，畫面更順、更清楚
