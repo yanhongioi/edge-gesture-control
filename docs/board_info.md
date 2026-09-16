@@ -91,13 +91,16 @@ ip addr show mlan0          # 看新的 IP
 - [x] 把 `board/` 部署到板子（scp）
 - [ ] 用 `benchmark_model` 量 NPU / CPU 推論時間 → 填到下表
 - [x] 單張圖片測試（`hand_cam.py --image`，NPU）：結果正確，與 PC CPU 結果一致
-- [ ] 即時鏡頭 + 瀏覽器看骨架 → 記錄 FPS
+- [x] 即時鏡頭 + 瀏覽器看骨架：板子約 30 FPS（等於 C270 上限），瀏覽器畫面會卡（熱點）
 - [ ] MQTT（需要先安裝 paho-mqtt）
 - [ ] 改用充電器供電、Wi-Fi 開機自動連線
 
 ## 已知問題
 
 - **官方 Vela 模型載入失敗**：錯誤為 `Tensor 8 is invalidly specified in schema`。原因是舊版 Vela 讓 `*_scratch_fast` tensor 指向一個空的 buffer，TFLite 2.19 會拒絕載入。已用 `scripts/fix_vela_scratch.py` 修正 repo 裡的兩個 `_vela.tflite`（2026-09-16）。
+
+- **透過手機熱點看串流會卡**：板子本身有 30 FPS，瓶頸在網路（板子 → 手機 → 筆電，ping 61～446 ms）。`--stream-scale 0.5 --stream-fps 10` 比較順，但畫質太低、仍有延遲。demo 時請改用 HDMI 螢幕，或接網路線。
+  - i.MX93 沒有硬體影像編碼器，JPEG 壓縮只能靠 CPU，所以無法用 H.264 串流來省頻寬。
 
 ## 效能紀錄
 
@@ -108,4 +111,4 @@ NPU 分工（delegate 訊息）：偵測模型 `1 nodes delegated out of 2`，�
 | --- | --- | --- |
 | hand_detect_20000_quant | 9.8 ms（單張圖片、第一次推論，含暖機） | |
 | hand_landmark_new_256x256_integer_quant | 12.2 ms（同上） | |
-| `hand_cam.py` 即時 FPS | | |
+| `hand_cam.py` 即時 FPS（640x480，1 隻手） | 約 30（`--port 0` 和輕量串流都一樣，受限於鏡頭 30 fps） | |
