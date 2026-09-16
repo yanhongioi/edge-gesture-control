@@ -8,6 +8,7 @@
 #   * 內建 HTTP MJPEG 串流 -> 筆電瀏覽器開 http://<板子IP>:8080 就能看到畫面+骨架
 #   * 可選：板子 HDMI 螢幕顯示 (--display)、MQTT 送出 21 點座標 (--mqtt)
 #   * 手部追蹤：找到手之後用上一幀的骨架範圍當裁切框，只跑骨架模型；跟丟才跑手部偵測
+#   * 找手時，一幀看全畫面、一幀只看人物上半身附近 (遠距離時手在偵測模型裡會變大)
 #   * 人物定位：每 N 幀跑一次人物偵測 (MobileNetSSD_VehicleHumanDetector)，標出人的中心點
 #     和偏離畫面中央的量 dx，給之後的雲台用
 #
@@ -29,6 +30,7 @@ import time
 import signal
 import argparse
 import threading
+import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
@@ -239,6 +241,20 @@ class PersonLocator:
         cx, cy = self.center()
         return (cx - fw / 2) / (fw / 2), (cy - fh / 2) / (fh / 2)
 
+    def search_roi(self, fw, fh):
+        """找手用的正方形區域：以人物為中心、涵蓋頭頂上方到腰部、左右留手臂伸展的空間。
+        遠距離時人很小，這塊區域交給手部偵測，手在模型輸入裡會比看全畫面大很多。"""
+        if self.box is None or self.age >= self.every * 2:
+            return None
+        x0, y0, x1, y1 = self.box
+        pw, ph = x1 - x0, y1 - y0
+        side = int(min(max(pw * 2.2, ph * 0.9, 160), fw, fh))
+        cx = (x0 + x1) / 2
+        top = y0 - 0.15 * side                       # 手可能舉過頭
+        sx0 = int(min(max(0, cx - side / 2), fw - side))
+        sy0 = int(min(max(0, top), fh - side))
+        return sx0, sy0, sx0 + side, sy0 + side
+
     def draw(self, frame):
         fh, fw = frame.shape[:2]
         mx, my = fw // 2, fh // 2
@@ -430,6 +446,10 @@ def draw_hand(frame, px, py):
         cv2.circle(frame, (px[i], py[i]), 4, color, -1)
 
 
+# process() 每幀留下的資訊 (給主迴圈統計、決定這一幀偵測要看哪裡)
+STATE = types.SimpleNamespace(det_count=0, last_presences=[], last_det_ran=False)
+
+
 def process(frame, detector, landmark, person, tracker, args):
     """在 frame 上畫出結果，回傳 (hands, person_info, (det_ms, lmk_ms, person_ms))；
     座標皆為 0~1 正規化；沒跑的模型時間為 0"""
@@ -488,7 +508,21 @@ def process(frame, detector, landmark, person, tracker, args):
     #    偵測模型常給出「不是手」的高分框，所以依分數由高到低最多試 --hand-candidates 個
     det_ran = len(hands) < args.max_hands
     if det_ran:
-        boxes, _, scores, det_ms = detector(rgb)
+        # 有人物時，一幀看人物附近、一幀看全畫面，輪流
+        search = None
+        if person is not None and not args.no_person_search and STATE.det_count % 2 == 0:
+            search = person.search_roi(fw, fh)
+        STATE.det_count += 1
+        if search is not None:
+            sx0, sy0, sx1, sy1 = search
+            boxes, _, scores, det_ms = detector(rgb[sy0:sy1, sx0:sx1])
+            sw, sh = sx1 - sx0, sy1 - sy0
+            boxes = np.stack([(sy0 + boxes[:, 0] * sh) / fh, (sx0 + boxes[:, 1] * sw) / fw,
+                              (sy0 + boxes[:, 2] * sh) / fh, (sx0 + boxes[:, 3] * sw) / fw], 1) \
+                if len(boxes) else boxes
+            cv2.rectangle(frame, (sx0, sy0), (sx1, sy1), (255, 0, 200), 1)
+        else:
+            boxes, _, scores, det_ms = detector(rgb)
         tried = 0
         for box, score in sorted(zip(boxes, scores), key=lambda t: -t[1]):
             if score < args.det_thresh or len(hands) >= args.max_hands or tried >= args.hand_candidates:
@@ -510,9 +544,10 @@ def process(frame, detector, landmark, person, tracker, args):
     if tracker is not None:
         tracker.tracks = new_tracks
     person_info = person.as_dict(fw, fh) if person is not None else None
-    process.last_presences = presences      # 給主迴圈做統計
-    process.last_det_ran = det_ran
+    STATE.last_presences = presences        # 給主迴圈做統計
+    STATE.last_det_ran = det_ran
     return hands, person_info, (det_ms, lmk_ms, person_ms)
+
 
 
 # --------------------------------------------------------------------------------------
@@ -537,6 +572,8 @@ def main():
     ap.add_argument("--lmk-thresh", type=float, default=0.7, help="手骨信心分數門檻")
     ap.add_argument("--max-hands", type=int, default=1, help="每幀最多處理幾隻手 (每多一隻多一次推論)")
     ap.add_argument("--no-track", action="store_true", help="關閉手部追蹤 (每幀都跑手部偵測)")
+    ap.add_argument("--no-person-search", action="store_true",
+                    help="找手時不要看人物附近的區域 (只看全畫面)")
     ap.add_argument("--track-scale", type=float, default=1.8, help="追蹤時裁切框 = 骨架範圍 x 這個倍數")
     ap.add_argument("--hand-candidates", type=int, default=2,
                     help="每幀最多拿幾個手部偵測框給骨架模型確認 (前面的框被否決才會試下一個)")
@@ -625,11 +662,11 @@ def main():
                                                                     person, tracker, args)
 
             n_frames += 1
-            n_tries += len(process.last_presences)
-            n_det += process.last_det_ran
-            if process.last_presences:
+            n_tries += len(STATE.last_presences)
+            n_det += STATE.last_det_ran
+            if STATE.last_presences:
                 n_cand += 1
-                pres_sum += max(process.last_presences)
+                pres_sum += max(STATE.last_presences)
             if hands:
                 n_ok += 1
 
