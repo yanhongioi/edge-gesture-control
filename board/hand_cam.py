@@ -500,7 +500,9 @@ def process(frame, detector, landmark, person, tracker, args):
             if roi is None or any(iou(roi, r) > 0.3 for r in rois):
                 continue
             xy, z, presence = run_landmark(roi)
-            if presence >= args.lmk_thresh:
+            # 已經在追的手用較低的門檻 (--track-thresh)，分數偶爾下滑一兩幀不會斷掉；
+            # 新偵測到的手仍用 --lmk-thresh
+            if presence >= args.track_thresh:
                 accept(roi, xy, z, presence, track["score"], "track", (255, 255, 0))
                 new_tracks.append(tracker.follow(track, xy))
 
@@ -576,6 +578,8 @@ def main():
     ap.add_argument("--no-person-search", action="store_true",
                     help="找手時不要看人物附近的區域 (只看全畫面)")
     ap.add_argument("--track-scale", type=float, default=1.8, help="追蹤時裁切框 = 骨架範圍 x 這個倍數")
+    ap.add_argument("--track-thresh", type=float, default=0.55,
+                    help="追蹤中的手，骨架信心低於這個值才算跟丟 (新偵測到的手用 --lmk-thresh)")
     ap.add_argument("--hand-candidates", type=int, default=2,
                     help="每幀最多拿幾個手部偵測框給骨架模型確認 (前面的框被否決才會試下一個)")
     ap.add_argument("--port", type=int, default=8080, help="HTTP 串流埠，0 = 不開")

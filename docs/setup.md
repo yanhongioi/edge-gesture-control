@@ -320,6 +320,7 @@ python3 hand_cam.py --det-thresh 0.3   # 手比較遠、偵測不到時調低門
 python3 hand_cam.py --max-hands 2      # 同時追兩隻手（FPS 會下降）
 python3 hand_cam.py --person-every 10  # 人物偵測改成每 10 幀跑一次（預設 5；0 = 關閉）
 python3 hand_cam.py --no-track         # 關閉手部追蹤（每幀都跑手部偵測，用來比較）
+python3 hand_cam.py --track-thresh 0.5 # 追蹤中的手，骨架分數低於這個值才算跟丟（預設 0.55；新偵測到的手用 --lmk-thresh 0.7）
 python3 hand_cam.py --no-person-search # 找手時只看全畫面，不看人物附近（用來比較）
 python3 hand_cam.py --debug            # 畫出除錯用的紅框、紫框
 python3 hand_cam.py --port 0           # 不開串流（省下 JPEG 編碼的 CPU）
