@@ -565,7 +565,7 @@ def main():
     ap.add_argument("--model-person", default=os.path.join(HERE, "models/detect_ssdmobilenetv3_quant.tflite"))
     ap.add_argument("--person-every", type=int, default=5, help="人物偵測每幾幀跑一次，0 = 關閉")
     ap.add_argument("--person-thresh", type=float, default=0.5, help="人物偵測分數門檻")
-    ap.add_argument("--device", default="", help="例如 /dev/video0；不給就自動找 C270")
+    ap.add_argument("--device", default="", help="例如 /dev/video2；不給就自動找 C270")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--fps", type=int, default=30)

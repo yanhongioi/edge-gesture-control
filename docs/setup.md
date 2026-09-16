@@ -2,7 +2,7 @@
 
 從零開始的完整步驟。我們這塊板子目前的實際狀態（IP、接線、進度）記錄在 [README 的「板子狀態」](../README.md#板子狀態)。
 
-目標：C270 接在板子上，板子用 NPU 跑「手部偵測 + 21 點手骨架」，筆電螢幕即時看到畫面與骨架。
+目標：C270 接在板子上，板子用 NPU 跑「手部偵測 + 21 點手骨架 + 人物定位」，筆電螢幕即時看到畫面與骨架。辨識流程和調校紀錄見 README。
 
 ```text
 C270 ──USB──▶ FRDM-i.MX93 (NPU 推論) ──USB 直連 / 網路線──▶ 筆電
@@ -59,7 +59,7 @@ C270 ──USB──▶ FRDM-i.MX93 (NPU 推論) ──USB 直連 / 網路線─
 | 即時 CPU 使用率 | `top`（按 `q` 離開） |
 | 網路介面與 IP | `ip addr` |
 | 接了哪些鏡頭 | `v4l2-ctl --list-devices` |
-| 鏡頭支援的解析度 | `v4l2-ctl -d /dev/video0 --list-formats-ext` |
+| 鏡頭支援的解析度 | `v4l2-ctl -d /dev/video2 --list-formats-ext`（節點換成你的 C270，見步驟 5） |
 | USB 裝置 | `lsusb` |
 | NPU 驅動有沒有起來 | `ls /dev/ethosu*`、`dmesg \| grep -i ethos` |
 | NPU delegate 在不在 | `ls -l /usr/lib/libethosu_delegate.so` |
@@ -67,7 +67,7 @@ C270 ──USB──▶ FRDM-i.MX93 (NPU 推論) ──USB 直連 / 網路線─
 | OpenCV 版本 | `python3 -c "import cv2; print(cv2.__version__)"` |
 | MQTT 套件（MQTT image 才有） | `python3 -c "import paho.mqtt; print('ok')"`、`which mosquitto_pub` |
 | **別人放進去的模型在哪** | `find / -name "*.tflite" -not -path "/proc/*" 2>/dev/null \| grep -i hand` |
-| 有沒有其他程式在用鏡頭 | `fuser /dev/video0` |
+| 有沒有其他程式在用鏡頭 | `fuser /dev/video2` |
 | 開機後的核心訊息 | `dmesg \| tail -50` |
 
 ### 圖形化看檔案（選用）
@@ -257,12 +257,12 @@ ssh root@192.168.7.2       # USB 直連；網路線是 192.168.10.2；熱點則�
 v4l2-ctl --list-devices
 ```
 
-找到 `C270 HD WEBCAM` 下面列出的**第一個** `/dev/videoX`（第二個是 metadata，不能用）。
+找到 `C270 HD WEBCAM` 下面列出的**第一個** `/dev/videoX`（第二個是 metadata，不能用）。我們這塊板子是 `/dev/video2`；`/dev/video0`、`/dev/video1` 是板子自己的 MIPI 鏡頭介面。
 
 有接 HDMI 的話，可以先直接看鏡頭畫面（`Ctrl+C` 結束）：
 
 ```bash
-gst-launch-1.0 v4l2src device=/dev/video0 ! videoconvert ! waylandsink
+gst-launch-1.0 v4l2src device=/dev/video2 ! videoconvert ! waylandsink
 ```
 
 ---
@@ -307,7 +307,9 @@ python3 hand_cam.py --image test_images/hand-1.jpg
 python3 hand_cam.py
 ```
 
-筆電瀏覽器打開 **http://192.168.7.2:8080**（USB 直連；網路線是 `http://192.168.10.2:8080`），就能看到鏡頭畫面、手部框（黃色 = 這一幀偵測到的，青色 `track` = 追蹤中，加 `--debug` 時還會畫出：細紅框 = 被骨架模型否決的偵測框、細紫框 = 這一幀在人物附近找手的範圍）、骨架（綠線、藍點，指尖是紅點），以及人物框（藍色，灰色代表最近沒更新到）、人物中心點、畫面中央十字和水平偏移 `dx`。左上角會顯示 NPU/CPU、FPS 和兩個模型各自的推論時間。終端機每 2 秒也會印一次 FPS。
+筆電瀏覽器打開 **http://192.168.7.2:8080**（USB 直連；網路線是 `http://192.168.10.2:8080`），就能看到鏡頭畫面、手部框（黃色 = 這一幀偵測到的，青色 `track` = 追蹤中，加 `--debug` 時還會畫出：細紅框 = 被骨架模型否決的偵測框、細紫框 = 這一幀在人物附近找手的範圍）、骨架（綠線、藍點，指尖是紅點），以及人物框（藍色，灰色代表最近沒更新到）、人物中心點、畫面中央十字和水平偏移 `dx`。左上角會顯示 NPU/CPU、FPS，以及各模型的推論時間。終端機每 2 秒印一行統計（`ok`、`lmk-best`、`tries`、`det-run`，欄位意思見 README 的「辨識流程」）。
+
+**站遠一點時**：先把手舉到臉旁邊（起手式），讓系統找到手、出現青色 `track` 框，之後手移到別處也會繼續追蹤。
 
 常用選項：
 
@@ -316,7 +318,6 @@ python3 hand_cam.py --display          # 同時顯示在板子 HDMI 螢幕（按
 python3 hand_cam.py --delegate cpu     # 改用 CPU 跑，跟 NPU 比較 FPS（demo 用）
 python3 hand_cam.py --mirror           # 左右翻轉，像照鏡子
 python3 hand_cam.py --device /dev/video2   # 自動找不到 C270 時手動指定
-python3 hand_cam.py --det-thresh 0.3   # 手比較遠、偵測不到時調低門檻
 python3 hand_cam.py --max-hands 2      # 同時追兩隻手（FPS 會下降）
 python3 hand_cam.py --person-every 10  # 人物偵測改成每 10 幀跑一次（預設 5；0 = 關閉）
 python3 hand_cam.py --no-track         # 關閉手部追蹤（每幀都跑手部偵測，用來比較）
@@ -365,17 +366,18 @@ python3 hand_cam.py -h                 # 所有參數
 | `Tensor N is invalidly specified in schema`（`required_bytes <= bytes`） | 舊版 Vela 編出來的模型，新版 TFLite (2.16+) 不接受。在 PC 執行 `python scripts/fix_vela_scratch.py <模型>_vela.tflite` 修正後，再重新傳到板子。repo 裡的模型已經修過；**板子上 `/root/hand-demo/model/` 的原版模型沒有修**。 |
 | `Failed to load delegate` | 官方 `app.py` 預設的 `vx` 是 i.MX8MP 的 delegate，i.MX93 要用 `ethosu`。`hand_cam.py` 預設已經是 NPU (ethosu)。 |
 | `找不到 USB 鏡頭` | `v4l2-ctl --list-devices` 查到節點後，用 `--device /dev/videoX` 指定。 |
-| `無法開啟鏡頭` / Device busy | 有其他程式在用鏡頭（例如 GoPoint demo）。用 `fuser /dev/video0` 找出來再 `kill`。 |
-| 有畫面、有橘框但沒有骨架 | 手骨信心分數低於門檻，可以試 `--lmk-thresh 0.5`。光線要夠，手在畫面中不要太小。 |
+| `無法開啟鏡頭` / Device busy | 有其他程式在用鏡頭（例如 GoPoint demo）。用 `fuser /dev/video2`（換成你的鏡頭節點）找出來再 `kill`。 |
+| 有手部框但沒有骨架 | 加 `--debug` 看紅框：紅框代表偵測框被骨架模型否決（通常框到的不是手）。骨架分數多半不是接近 0 就是接近 1，調門檻幫助不大。 |
 | NPU 沒骨架但 `--delegate cpu` 有 | Vela 版輸出順序不同。比對啟動時印出的 `out0..out2` shape：21×3 座標是 63 個值、信心分數是 1 個值。然後修改 `HandLandmark.__init__` 裡的 `outs[2]` / `outs[0]`。 |
-| 手部框完全偵測不到 | 試 `--det-thresh 0.3`；手靠近鏡頭一點。 |
+| 手部框完全偵測不到 | 手在畫面中太小（640×480 裡寬度小於約 50～70 px，大約是 1.5 公尺以外）。靠近一點，或先把手舉到臉旁邊，找到後再退回原位。**不要把 `--det-thresh` 調到 0.5 以下**：沒有手時偵測模型會給出一堆剛好 0.50 的假框。 |
 | `--display` 報錯 cannot open display | 板子 HDMI 桌面 (Weston) 沒有啟動，或 `/run/user/0/wayland-*` 不存在。改用瀏覽器串流即可。 |
 | 瀏覽器串流打不開 | 確認筆電 ping 得到板子；程式有印「串流已開啟」；網址是 `http://`，不是 https。 |
 | 串流很卡但終端機 FPS 正常 | 瓶頸在網路（手機熱點延遲大）。**改用 USB 直連（3-D）或網路線**，實測後非常順。暫時的解法是 `--stream-scale 0.5 --stream-fps 10` 減少傳輸量。 |
 | `g_ether` 載入後，Windows 出現「USB 序列裝置 (COMx)」 | Windows 把舊式 RNDIS 認成序列埠，也無法手動改成網卡驅動。先執行 `rmmod g_ether`（`usb_net.sh` 會自動處理），再改用 `sh usb_net.sh`（NCM）。 |
 | `usb_net.sh` 執行了，但 `state` 是 `not attached`，Windows 也沒反應 | 改用 A 對 C 線接筆電的 **USB-A**（C 對 C 線可能被協商成板子當主機）；也確認這條線能傳資料，不是只能充電的線。 |
 | 終端機 FPS 本身就很低 | 瓶頸在板子。先用 `--port 0` 關掉串流，看 FPS 有沒有回升；再試 `--width 320 --height 240`。 |
-| 重開機後 SSH 連不上 | IP 設定消失了。USB 直連要從序列埠重新執行 `sh /root/edge-gesture-control/board/usb_net.sh`；熱點要重做 3-A 第 4 步；網路線要重做 3-B-2。 |
+| 重開機後 SSH 連不上 | 網路設定不會保留。在序列埠執行 `sh /root/edge-gesture-control/board/bringup.sh`（USB 直連 + Wi-Fi）；網路線要重做 3-B-2。 |
+| 按 Ctrl+C 出現 `Failed to invoke ethos_u op` | 舊版程式在 NPU 推論途中被中斷，新版已經修正，會等這一幀跑完再結束。 |
 
 ---
 
@@ -384,5 +386,5 @@ python3 hand_cam.py -h                 # 所有參數
 以下是寫程式時無法在板子上實測的部分，第一次上板請留意：
 
 1. ~~Vela 版模型的輸出順序是否與原始版相同~~ → 已確認相同（2026-09-16）。
-2. 板子的 OpenCV 是否支援 GStreamer（不支援的話程式會自動改用 V4L2）。
-3. 1～1.5 公尺距離下（廚房情境），C270 畫面中的手夠不夠大、偵測得到嗎（對應 plan 技術細節第 10 點）。
+2. 板子的 OpenCV 是否支援 GStreamer（不支援的話程式會自動改用 V4L2）→ 還沒確認，看 `hand_cam.py` 啟動時印的「鏡頭開啟 (…)」。
+3. ~~1～1.5 公尺距離下，C270 畫面中的手夠不夠大~~ → 1.5 公尺已經是偵測模型的極限，靠手部追蹤、在人物附近找手、起手式來補強，詳見 README 的調校紀錄（2026-09-17）。
