@@ -40,6 +40,7 @@ edge-gesture-control/
 
 ```powershell
 # 0. 網路：USB 直連（板子 192.168.7.2 ↔ 筆電 192.168.7.1），設定方式見教學 3-D
+#    Wi-Fi 只讓板子上網，連哪個網路都可以（教學 3-A）
 # 1. 筆電：把 board/ 複製到板子（預設 192.168.7.2；其他 IP 用 -BoardIp）
 .\scripts\deploy_board.ps1
 

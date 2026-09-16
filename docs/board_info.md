@@ -57,39 +57,54 @@
 
 ## 網路
 
-目前兩條網路同時使用：**USB 直連**負責筆電和板子之間的傳輸（SSH、傳檔、串流），**手機熱點**只負責讓板子上網。
+網路分成兩條，**彼此獨立**：
+
+- **USB 直連**：負責筆電和板子之間的所有傳輸（SSH、傳檔、串流、之後的 MQTT）。IP 固定，**跟用哪個 Wi-Fi 無關**。
+- **Wi-Fi**：只讓板子上網（安裝套件、下載）。**連哪個網路都可以，之後也會換**，目前暫時借用個人手機熱點。
+
+| 要做的事 | 走哪條網路 | 換 Wi-Fi 有影響嗎 |
+| --- | --- | --- |
+| SSH、scp、看串流 | USB 直連 `192.168.7.2` | 沒有 |
+| 板子 → 筆電 MQTT | USB 直連，筆電是 `192.168.7.1` | 沒有 |
+| 板子上網（pip、下載） | Wi-Fi | 要重新設定 Wi-Fi |
+| 筆電上網（LLM、查資料） | 筆電自己的網路 | 沒有 |
 
 ### USB 直連（主要使用）
 
 | 項目 | 值 |
 | --- | --- |
 | 板子 | `usb0` = **`192.168.7.2/24`**（NCM gadget，由 `board/usb_net.sh` 設定；MAC `02:00:00:00:93:02`） |
-| 筆電 | 「**乙太網路 7**」（UsbNcm Host Device）= **`192.168.7.1/24`**，手動設定，Windows 會記住 |
+| 筆電 | **`192.168.7.1/24`**，手動設定，Windows 會記住。**每台筆電都要設定一次**（教學 3-D 第 5 步）；目前開發用的筆電上，這張網卡叫「乙太網路 7」，其他筆電的名稱會不一樣 |
 | SSH | `ssh root@192.168.7.2` ✅ |
 | 串流 | `http://192.168.7.2:8080`，640×480 很順 ✅ |
 
-### 手機熱點（讓板子上網）
+### Wi-Fi（讓板子上網，**暫時性設定**）
 
 | 項目 | 值 |
 | --- | --- |
-| 方式 | 板子和筆電都連手機熱點（2.4 GHz、WPA2-PSK） |
-| 板子設定檔 | `/etc/wpa_hotspot.conf`（熱點名稱和密碼只存在板子上，不放進 repo） |
-| 板子 IP | `10.52.95.226`（DHCP，**會變**） |
-| 筆電 IP | `10.52.95.205`（DHCP，**會變**） |
-| 筆電 ↔ 板子延遲 | ping 61～446 ms（熱點延遲大，串流可能卡） |
-| SSH | `ssh root@10.52.95.226`，免密碼 ✅（現在改用 USB 直連） |
+| 目前連的網路 | **暫時借用的個人手機熱點**（WPA2-PSK，2.4 GHz）。名稱和密碼不記錄在 repo |
+| 板子設定檔 | `/etc/wpa_hotspot.conf`（⚠ 內含目前網路的**明文密碼**，交出板子前要刪除或改寫） |
+| 板子 Wi-Fi IP | 由網路分配，**換網路或重新連線就會變**。查詢：`ip addr show mlan0`（在目前熱點下曾經是 `10.52.95.226`） |
+| 換網路 | 見教學 3-A「換成別的 Wi-Fi」，請透過 USB 直連的 SSH 操作 |
 
 ### 板子重開機後要重做的事（在序列埠一次貼一行）
+
+**USB 直連（每次都要做）**，做完就能從筆電 `ssh root@192.168.7.2`：
+
+```bash
+sh /root/edge-gesture-control/board/usb_net.sh
+```
+
+**Wi-Fi（板子需要上網時才做）**，連的是 `/etc/wpa_hotspot.conf` 裡的網路，也可以在 USB SSH 裡執行：
 
 ```bash
 ip link set mlan0 up
 wpa_supplicant -B -i mlan0 -D nl80211 -c /etc/wpa_hotspot.conf
 udhcpc -i mlan0
-sh /root/edge-gesture-control/board/usb_net.sh
 ```
 
 - 出現 `rfkill: Cannot open RFKILL control device` 可以忽略。
-- 待辦：改成開機自動連線（Wi-Fi + `usb_net.sh`）。
+- 待辦：開機自動執行 `usb_net.sh`。Wi-Fi 會換網路，是否也要開機自動連線，之後再決定。
 
 ---
 
@@ -116,7 +131,7 @@ sh /root/edge-gesture-control/board/usb_net.sh
 
 - **官方 Vela 模型載入失敗**：錯誤為 `Tensor 8 is invalidly specified in schema`。原因是舊版 Vela 讓 `*_scratch_fast` tensor 指向一個空的 buffer，TFLite 2.19 會拒絕載入。已用 `scripts/fix_vela_scratch.py` 修正 repo 裡的兩個 `_vela.tflite`（2026-09-16）。
 
-- **透過手機熱點看串流會卡**：板子本身有 30 FPS，瓶頸在網路（板子 → 手機 → 筆電，ping 61～446 ms）。→ **已改用 USB 直連解決**，640×480 很順。demo 時也可以接 HDMI 螢幕。
+- **透過手機熱點看串流會卡**：板子本身有 30 FPS，瓶頸在網路（筆電和板子都連熱點時，要經過手機轉送，ping 61～446 ms）。→ **已改用 USB 直連解決**，640×480 很順。demo 時也可以接 HDMI 螢幕。
 - **`g_ether` 在 Windows 上被認成「USB 序列裝置 (COM14)」**，也無法手動改成網卡驅動 → 改用 configfs 的 NCM（`usb_net.sh`），Windows 11 會自動認成 UsbNcm Host Device。
 - **C 對 C 線接 `USB1_C` 時沒有被辨識**，改用 A 對 C 線接筆電的 USB-A 就正常了。
 - `dmesg` 裡的 `ethosu: can't change firmware or remote processor is running`：每次啟動 NPU 程式都會出現，可以忽略。
