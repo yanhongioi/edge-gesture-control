@@ -1,16 +1,18 @@
 # --------------------------------------------------------------------------------------
 # PC 端：收到板子確認過的手勢，就控制這台電腦 (Windows)
 #
-# 目前的對應：
-#   point  -> 游標模式：滑鼠游標跟著食指尖 (第 8 點) 移動
-#             開始：手勢確認為 point；結束：這一幀不是 point 或手不見 → 立刻停，
-#             游標退回幾筆資料之前的位置 (收手時食指在彎，最後幾筆位置不準)
-#   CONTINUOUS 表：手勢維持期間重複執行的動作 (目前空的；scroll_down / scroll_up 可以拿來用)
+# 游標模式 (CursorController)：
+#   待機 --point--> 游標移動 --open--> 按住左鍵 (可拖曳) --point--> 放開，回到游標移動
+#   * 游標跟著食指尖 (第 8 點)；point、open 時食指都是伸直的，換手勢時位置不太會跳
+#   * 待機時單獨比 open 不會有動作 (open 也是「起手式」，不能一舉手就點下去)
+#   * 換手勢的過程中游標凍結在換之前的位置，按下 / 放開都在那個位置發生；
+#     按下後再停 --press-settle 秒才開始拖，所以快速 point→open→point = 一次乾淨的點擊
+#   * 手不見、其他手勢超過 --grace 秒、資料中斷、程式結束 → 結束游標模式，按住的左鍵一律放開
 #
 # 用法:
 #   py -3.11 pc\gesture_control.py                         # broker 在這台電腦
 #   py -3.11 pc\gesture_control.py --broker 10.66.97.205   # broker 在別台電腦
-#   py -3.11 pc\gesture_control.py --dry-run               # 只印出動作，不真的動游標
+#   py -3.11 pc\gesture_control.py --dry-run               # 只印出動作，不真的控制
 #   py -3.11 pc\gesture_control.py --region 0.3            # 手移動較小範圍就能走遍整個螢幕
 #
 # 板子請加 --mqtt-hz 30 (預設 15 Hz，游標會一頓一頓)：
@@ -31,8 +33,11 @@ import paho.mqtt.client as mqtt
 
 TOPIC = "edge/hand"
 INDEX_TIP = 8                  # MediaPipe 21 點：8 = 食指尖
-CURSOR_GESTURE = "point"
+MOVE_GESTURE = "point"         # 游標移動
+PRESS_GESTURE = "open"         # 按住左鍵 (只在游標模式中有效)
 WHEEL_DELTA = 120              # Windows 滾輪一格 = 120
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_WHEEL = 0x0800
 
 
@@ -57,6 +62,10 @@ def screen_size():
 
 def set_cursor(x, y):
     ctypes.windll.user32.SetCursorPos(int(x), int(y))
+
+
+def left_button(down):
+    ctypes.windll.user32.mouse_event(MOUSEEVENTF_LEFTDOWN if down else MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
 
 
 def wheel(delta):
@@ -110,60 +119,120 @@ class OneEuro:
         return self.x
 
 
-class CursorMode:
-    """point 期間讓游標跟著食指尖；由 MQTT 執行緒每收到一筆資料呼叫一次 update()"""
+class CursorController:
+    """游標移動 + 點擊 / 拖曳的狀態機。MQTT 執行緒每收到一筆資料呼叫 update()。
+    狀態：idle (待機)、move (游標跟著食指)、press (左鍵按住)"""
 
-    UNDO_SAMPLES = 3            # 結束時退回幾筆之前的位置
+    FREEZE_BACK = 3             # 換手勢時，凍結在幾筆之前的位置 (換手勢時手指在動，最近幾筆不準)
 
-    def __init__(self, args, screen):
+    def __init__(self, args, screen, out=None):
         self.args, (self.sw, self.sh) = args, screen
+        self.out = out or {"set_cursor": set_cursor, "left_button": left_button}
         self.fx = OneEuro(args.min_cutoff, args.beta)
         self.fy = OneEuro(args.min_cutoff, args.beta)
-        self.history = deque(maxlen=self.UNDO_SAMPLES + 1)
-        self.active = False
+        self.history = deque(maxlen=self.FREEZE_BACK + 1)
+        self.state = "idle"
+        self.frozen = None          # 換手勢過程中凍結的位置
+        self.odd_since = None       # 開始出現「不是 point / open」的時間
+        self.settle_until = 0.0     # 按下後，這個時間之前不移動
+        self.pos = None
         self.moves = 0
         self.last_print = 0.0
 
+    # ---- 輸出 --------------------------------------------------------------------------
+    def _move(self, x, y, t):
+        self.pos = (x, y)
+        if self.args.dry_run:
+            if t - self.last_print > 0.5:
+                print(f"    游標 → ({x:6.0f}, {y:6.0f})")
+                self.last_print = t
+        else:
+            self.out["set_cursor"](x, y)
+
+    def _button(self, down):
+        print(f"  {'▼ 按下左鍵' if down else '▲ 放開左鍵'}  @ ({self.pos[0]:.0f}, {self.pos[1]:.0f})"
+              if self.pos else f"  {'▼ 按下左鍵' if down else '▲ 放開左鍵'}")
+        if not self.args.dry_run:
+            self.out["left_button"](down)
+
+    def _freeze(self, t):
+        """換手勢開始：游標退回幾筆之前的位置並停住"""
+        if self.frozen is None:
+            self.frozen = self.history[0] if self.history else self.pos
+            if self.frozen:
+                self._move(*self.frozen, t)
+
+    # ---- 狀態轉換 ----------------------------------------------------------------------
+    def _start(self):
+        self.state, self.moves = "move", 0
+        self.fx.reset(); self.fy.reset(); self.history.clear()
+        self.frozen, self.odd_since = None, None
+        print(f"  ▶ 游標模式開始（{MOVE_GESTURE}）")
+
+    def stop(self, reason=""):
+        """結束游標模式；按住中一律放開"""
+        if self.state == "idle":
+            return
+        if self.state == "press":
+            self._button(False)
+        self.state = "idle"
+        print(f"  ■ 游標模式結束{reason}（更新 {self.moves} 次）")
+
     def update(self, hand, t):
         a = self.args
-        want = (hand is not None and hand.get("gesture") == CURSOR_GESTURE
-                and hand.get("gesture_raw") == CURSOR_GESTURE)
-        if want and not self.active:                   # 開始
-            self.active, self.moves = True, 0
-            self.fx.reset(); self.fy.reset(); self.history.clear()
-            print(f"  ▶ 游標模式開始（{CURSOR_GESTURE}）")
-        elif not want and self.active:                 # 結束：立刻停，退回幾筆之前的位置
-            self.stop()
+        if hand is None:
+            self.stop("（手不見了）")
             return
-        if not self.active:
+        g, raw = hand.get("gesture"), hand.get("gesture_raw")
+
+        if self.state == "idle":
+            if g == MOVE_GESTURE and raw == MOVE_GESTURE:
+                self._start()
+            else:
+                return                                   # 待機時單獨比 open 不動作
+
+        # 不是 point / open 的狀態太久 → 結束
+        if raw not in (MOVE_GESTURE, PRESS_GESTURE) and g not in (MOVE_GESTURE, PRESS_GESTURE):
+            self.odd_since = self.odd_since or t
+            self._freeze(t)
+            if t - self.odd_since > a.grace:
+                self.stop("（換成其他手勢）")
             return
+        self.odd_since = None
+
+        # 確認過的手勢改變 → 按下 / 放開 (位置用凍結的那個)
+        if self.state == "move" and g == PRESS_GESTURE:
+            self._freeze(t)
+            self._button(True)
+            self.state, self.settle_until = "press", t + a.press_settle
+        elif self.state == "press" and g == MOVE_GESTURE:
+            self._freeze(t)
+            self._button(False)
+            self.state = "move"
+
+        want = MOVE_GESTURE if self.state == "move" else PRESS_GESTURE
+        if raw != want or g != want or t < self.settle_until:
+            self._freeze(t)                              # 換手勢中 / 剛按下：游標不動
+            return
+
+        # 正常跟著食指尖移動
+        if self.frozen is not None:                      # 從凍結恢復：濾波從凍結位置接續，避免跳動
+            self.fx.reset(); self.fy.reset()
+            self.fx(self.frozen[0], t - 1e-3); self.fy(self.frozen[1], t - 1e-3)
+            self.history.clear()
+            self.frozen = None
         tip = hand["landmarks"][INDEX_TIP]
         x, y = map_to_screen(tip[0], tip[1], self.sw, self.sh, a.region, (a.center_x, a.center_y),
                              not a.no_mirror)
         x, y = self.fx(x, t), self.fy(y, t)
         self.history.append((x, y))
         self.moves += 1
-        if a.dry_run:
-            if t - self.last_print > 0.5:
-                print(f"    游標 → ({x:6.0f}, {y:6.0f})  指尖 ({tip[0]:.3f}, {tip[1]:.3f})")
-                self.last_print = t
-        else:
-            set_cursor(x, y)
-
-    def stop(self, reason=""):
-        if not self.active:
-            return
-        self.active = False
-        if len(self.history) > 1:
-            x, y = self.history[0]                     # 最舊的那筆 = 幾筆之前
-            if not self.args.dry_run:
-                set_cursor(x, y)
-        print(f"  ■ 游標模式結束{reason}（更新 {self.moves} 次）")
+        self._move(x, y, t)
 
 
-# 持續型動作：手勢維持期間，每 --interval 秒執行一次
+# 持續型動作：手勢維持期間，每 --interval 秒執行一次 (游標模式以外的手勢)
 #   key = gesture.py 確認過的手勢名稱；value = (說明, 動作)
-#   之後的新手勢可以對應到這些，例如 "xxx": ("往下捲動", scroll_down)
+#   例如之後有新手勢時： "xxx": ("往下捲動", scroll_down)
 def scroll_down(a):
     if not a.dry_run:
         wheel(-a.scroll_step)
@@ -188,6 +257,11 @@ def main():
     ap.add_argument("--no-mirror", action="store_true", help="板子有加 --mirror 時請加這個")
     ap.add_argument("--min-cutoff", type=float, default=1.0, help="濾波：越小越穩、越黏")
     ap.add_argument("--beta", type=float, default=0.005, help="濾波：越大，快速移動時越跟手")
+    ap.add_argument("--press-settle", type=float, default=0.25,
+                    help="按下左鍵後，游標先停住幾秒才開始拖曳 (快速放開 = 點擊)")
+    ap.add_argument("--grace", type=float, default=0.3,
+                    help="換手勢時，容許幾秒「不是 point / open」才結束游標模式")
+    ap.add_argument("--no-click", action="store_true", help="關閉 open = 按住左鍵，只移動游標")
     ap.add_argument("--scroll-step", type=int, default=30, help="捲動量，120 = 滾輪一格")
     ap.add_argument("--interval", type=float, default=0.05, help="持續動作的間隔秒數")
     ap.add_argument("--stale", type=float, default=0.5, help="超過幾秒沒收到資料就停止動作")
@@ -196,12 +270,16 @@ def main():
     if sys.platform != "win32" and not args.dry_run:
         sys.exit("目前只支援 Windows；其他系統請先加 --dry-run 測試")
 
+    global PRESS_GESTURE
+    if args.no_click:
+        PRESS_GESTURE = "__disabled__"
+
     if sys.platform == "win32":
         setup_dpi()
         screen = screen_size()
     else:
         screen = (1920, 1080)
-    cursor = CursorMode(args, screen)
+    cursor = CursorController(args, screen)
     lock = threading.Lock()
     state = {"gesture": None, "stamp": 0.0}
 
@@ -231,8 +309,9 @@ def main():
     client.connect(args.broker, args.port)
     client.loop_start()
 
+    click = "" if args.no_click else f"，游標模式中 {PRESS_GESTURE} = 按住左鍵（換回 {MOVE_GESTURE} 放開）"
     extra = "".join(f", {g} = {desc}" for g, (desc, _) in CONTINUOUS.items())
-    print(f"手勢對應: {CURSOR_GESTURE} = 游標跟著食指尖{extra}"
+    print(f"手勢對應: {MOVE_GESTURE} = 游標跟著食指尖{click}{extra}"
           f"{'  [dry-run，不會真的控制]' if args.dry_run else ''}")
     print(f"螢幕 {screen[0]}x{screen[1]}，鏡頭畫面中央 {args.region:.0%} 對應整個螢幕"
           f"{'，左右翻轉' if not args.no_mirror else ''}。Ctrl+C 結束。")
@@ -243,7 +322,7 @@ def main():
             now = time.monotonic()
             with lock:
                 stale = now - state["stamp"] > args.stale
-                gesture = None if stale else state["gesture"]
+                gesture = None if stale or cursor.state != "idle" else state["gesture"]
                 if stale:
                     cursor.stop("（沒有收到資料）")
             action = gesture if gesture in CONTINUOUS else None
@@ -260,6 +339,8 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        with lock:
+            cursor.stop("（程式結束）")                  # 左鍵一定要放開
         client.loop_stop()
         client.disconnect()
         print("結束")
