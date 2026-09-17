@@ -22,7 +22,8 @@ edge-gesture-control/
 │   ├── models/               # 手部、人物模型（原始 + Vela 編譯版 + Vela 報告）
 │   └── test_images/          # 單張圖片測試用（張開手掌、握拳、指東西）
 ├── pc/                       # 跑在 Windows 筆電
-│   ├── hand_listener.py      # 接收板子送來的 21 點座標 (MQTT edge/hand)
+│   ├── hand_listener.py      # 接收板子送來的資料並顯示 (MQTT edge/hand)，除錯用
+│   ├── gesture_control.py    # 收到手勢就控制這台電腦（point = 持續往下捲）
 │   ├── mosquitto.conf        # MQTT broker 設定（允許外部連線）
 │   └── requirements.txt
 ├── scripts/
@@ -76,6 +77,11 @@ cd C:\Users\user\Desktop\NXP\edge-gesture-control
 py -3.11 .\pc\hand_listener.py
 ```
 
+　（要用手勢控制電腦時，把 ③ 換成下面這行，或再開一個視窗同時跑；先把滑鼠游標移到要捲動的網頁上）
+```powershell
+py -3.11 .\pc\gesture_control.py              # 加 --dry-run 只印出動作、不真的捲
+```
+
 **④ 筆電 PowerShell #3：SSH 進板子，開始辨識**
 ```powershell
 ssh root@192.168.7.2
@@ -90,6 +96,38 @@ python3 hand_cam.py --mqtt 192.168.7.1
 站遠一點時，先把**手掌張開、舉到臉旁邊**，讓系統找到手（出現青色 `track` 框），再比其他手勢。
 
 結束時：在 ④ 按 `Ctrl+C`；要關機的話在板子上執行 `poweroff`，等 10 秒再拔電。
+
+### 手勢控制（`pc/gesture_control.py`）
+
+| 手勢（確認過的 `gesture`） | 動作 |
+| --- | --- |
+| `point`（只伸食指） | 維持期間持續慢慢往下捲（滑鼠滾輪），換手勢、手不見、或 0.5 秒沒收到資料就停 |
+
+```powershell
+py -3.11 .\pc\gesture_control.py --scroll-step 60      # 捲快一點（120 = 滾輪一格，預設 30）
+py -3.11 .\pc\gesture_control.py --interval 0.1        # 捲動間隔變長（預設 0.05 秒）
+py -3.11 .\pc\gesture_control.py --broker <IP>         # broker 在別台電腦
+```
+
+- 捲動作用在**滑鼠游標底下的視窗**。
+- 要新增手勢對應，在檔案裡的 `CONTINUOUS` 表加一行即可。
+- 手勢要連續 4 幀才會確認，所以從比出手勢到開始動作，大約需要 0.13 秒；換手勢時也會多延續這麼一點時間。
+
+### 用另一台電腦接收 / 被控制
+
+控制程式可以跑在任何連得到 broker 的電腦上。
+
+| 做法 | 怎麼接 | 備註 |
+| --- | --- | --- |
+| **A. USB 線改插到那台電腦**（demo 推薦） | 那台電腦照 setup.md 3-D 設好 `192.168.7.1`，再照步驟 9 裝好 Mosquitto，指令都跟上面一樣 | 延遲最低 |
+| B. 板子透過 Wi-Fi 送到那台電腦 | 那台電腦連同一個熱點、啟動 broker；板子改用 `--mqtt <那台電腦的 Wi-Fi IP>` | 會經過熱點，延遲大（實測 60～400 ms），不適合游標模式 |
+| C. broker 留在原本的電腦，另一台去訂閱 | 另一台電腦跑 `gesture_control.py --broker <原本那台電腦的 Wi-Fi IP>` | 兩台可以同時收到資料；延遲跟 B 一樣 |
+
+B、C 都要讓跑 broker 的電腦對 Wi-Fi 開放 1883 埠。我們的 broker 不需要帳密就能連線，所以**只在自己的手機熱點上這樣做**，不要在學校或比賽場地的公共 Wi-Fi 上開。系統管理員 PowerShell，`Wi-Fi` 換成你的無線網卡名稱：
+```powershell
+New-NetFirewallRule -DisplayName "MQTT 1883 (Wi-Fi, trusted hotspot only)" -Direction Inbound -Protocol TCP -LocalPort 1883 -InterfaceAlias "Wi-Fi" -Action Allow
+Remove-NetFirewallRule -DisplayName "MQTT 1883 (Wi-Fi, trusted hotspot only)"    # 用完要記得關
+```
 
 ### 改了程式之後
 
@@ -317,9 +355,10 @@ C270 640×480
 
 - [x] 在板子上安裝 `paho-mqtt`
 - [x] 筆電安裝 Mosquitto，打通 MQTT（板子 → 筆電），`pc/hand_listener.py` 收得到手部、手勢、人物資料
+- [x] PC 控制：`pc/gesture_control.py`，`point` → 持續慢慢往下捲（PC 上用模擬訊息測過，**待實機驗證**）
 - [ ] 上板驗證手勢：先張開手掌讓系統找到手，追蹤中再改比 `point`，看能不能正確判斷
 - [ ] 更多手勢（握拳、左右滑等）；「起手式」＝張開手掌舉到臉旁邊
-- [ ] PC 控制原語（捲動、快捷鍵），收到手勢就執行
+- [ ] 更多 PC 控制（往上捲、快捷鍵、暫停 / 播放）
 - [ ] 防誤觸：手勢維持一段時間才觸發、冷卻時間、提示音
 
 **之後再做**
