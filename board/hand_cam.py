@@ -36,6 +36,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import cv2
 import numpy as np
 
+import gesture
+
 try:
     import tflite_runtime.interpreter as tflite          # 板子 (NXP BSP)
 except ImportError:
@@ -181,15 +183,17 @@ class HandTracker:
 
     @staticmethod
     def follow(track, pts):
-        """用這一幀的結果更新 track (速度 = 中心點位移，限制在手的大小以內)"""
+        """用這一幀的結果更新 track (速度 = 中心點位移，限制在手的大小以內)；
+        沿用同一個 smoother，手勢的連續幀數才會累積"""
         old_c, new_c = track["pts"].mean(0), pts.mean(0)
         size = max(np.ptp(pts[:, 0]), np.ptp(pts[:, 1]))
         vel = np.clip(new_c - old_c, -size / 2, size / 2)
-        return {"pts": pts, "vel": vel, "score": track["score"]}
+        return {"pts": pts, "vel": vel, "score": track["score"], "smoother": track["smoother"]}
 
     @staticmethod
-    def new(pts, score):
-        return {"pts": pts, "vel": np.zeros(2), "score": score}
+    def new(pts, score, smoother=None):
+        return {"pts": pts, "vel": np.zeros(2), "score": score,
+                "smoother": smoother or gesture.GestureSmoother()}
 
 
 PERSON_CLASS = 0      # COCO label: 0 = person
@@ -474,10 +478,12 @@ def process(frame, detector, landmark, person, tracker, args):
         xy = np.stack([x0 + pts[:, 0] * sx, y0 + pts[:, 1] * sy], 1)
         return xy, pts[:, 2], presence
 
-    def accept(roi, xy, z, presence, score, source, color):
+    def accept(roi, xy, z, presence, score, source, color, gesture_raw, gesture_confirmed):
         x0, y0, x1, y1 = roi
         cv2.rectangle(frame, (x0, y0), (x1, y1), color, 2)
-        label = f"track  lmk {presence:.2f}" if source == "track" else f"hand {score:.2f}  lmk {presence:.2f}"
+        tag = f" {gesture_confirmed}" if gesture_confirmed else (f" ({gesture_raw})" if gesture_raw else "")
+        label = (f"track  lmk {presence:.2f}{tag}" if source == "track"
+                  else f"hand {score:.2f}  lmk {presence:.2f}{tag}")
         cv2.putText(frame, label, (x0, max(14, y0 - 6)), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
         px, py = xy[:, 0].astype(int).tolist(), xy[:, 1].astype(int).tolist()
         draw_hand(frame, px, py)
@@ -486,6 +492,8 @@ def process(frame, detector, landmark, person, tracker, args):
             "source": source,
             "score": round(float(score), 3),
             "presence": round(presence, 3),
+            "gesture": gesture_confirmed,      # 連續數幀一致才會有值 (見 GestureSmoother)
+            "gesture_raw": gesture_raw,        # 這一幀單獨判斷的結果，未經時間平滑
             "box": [round(x0 / fw, 4), round(y0 / fh, 4), round(x1 / fw, 4), round(y1 / fh, 4)],
             "landmarks": [[round(px[i] / fw, 4), round(py[i] / fh, 4), round(float(z[i]), 2)]
                           for i in range(21)],
@@ -503,7 +511,9 @@ def process(frame, detector, landmark, person, tracker, args):
             # 已經在追的手用較低的門檻 (--track-thresh)，分數偶爾下滑一兩幀不會斷掉；
             # 新偵測到的手仍用 --lmk-thresh
             if presence >= args.track_thresh:
-                accept(roi, xy, z, presence, track["score"], "track", (255, 255, 0))
+                raw = gesture.classify_landmarks(xy)
+                confirmed = track["smoother"].update(raw)
+                accept(roi, xy, z, presence, track["score"], "track", (255, 255, 0), raw, confirmed)
                 new_tracks.append(tracker.follow(track, xy))
 
     # 2) 偵測：手還不夠 (還沒找到或跟丟了) 才跑手部偵測。
@@ -536,9 +546,13 @@ def process(frame, detector, landmark, person, tracker, args):
             tried += 1
             xy, z, presence = run_landmark(roi)
             if presence >= args.lmk_thresh:
-                accept(roi, xy, z, presence, score, "detect", (0, 200, 255))
+                # 沒開追蹤 (--no-track) 時每幀都是新的 smoother，手勢永遠不會累積到確認門檻
+                smoother = gesture.GestureSmoother()
+                raw = gesture.classify_landmarks(xy)
+                confirmed = smoother.update(raw)
+                accept(roi, xy, z, presence, score, "detect", (0, 200, 255), raw, confirmed)
                 if tracker is not None:
-                    new_tracks.append(tracker.new(xy, float(score)))
+                    new_tracks.append(tracker.new(xy, float(score), smoother))
             elif args.debug:   # 被骨架模型否決的候選框：細紅框
                 cv2.rectangle(frame, roi[:2], roi[2:], (0, 0, 255), 1)
                 cv2.putText(frame, f"{score:.2f}/{presence:.2f}", (roi[0] + 2, roi[3] - 4),
