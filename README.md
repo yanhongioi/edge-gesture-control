@@ -6,7 +6,7 @@
 
 | 文件 | 內容 |
 | --- | --- |
-| `README.md`（本頁） | 專案概覽、快速開始、**板子目前狀態與進度** |
+| `README.md`（本頁） | 專案概覽、**指令區（每天用的指令）**、板子目前狀態與進度 |
 | [docs/setup.md](docs/setup.md) | 從零開始的上板教學：接線、登入、網路、跑模型、疑難排解 |
 | [docs/plan.md](docs/plan.md) | 專案構想、分工、demo 腳本 |
 
@@ -46,20 +46,121 @@ edge-gesture-control/
 
 **文件規則**：新的說明優先寫進現有的三份文件，不要另外開新的 md。
 
-## 快速開始
+## 指令區
 
-前提：筆電和板子已經用 USB 直連（板子 `192.168.7.2`、筆電 `192.168.7.1`）。第一次設定請看 [docs/setup.md](docs/setup.md) 的步驟 3-D。
+第一次設定（接線、網路、安裝）請看 [docs/setup.md](docs/setup.md)。以下是設定完成之後，每天會用到的指令。
+
+> 筆電上的 Python 請一律用 **`py -3.11`**。`python3` 或 `python` 可能會跑到 MSYS2 的 Python，那裡沒有我們裝的套件。
+> 板子上的 Python 用 `python3` 沒問題。
+
+### 每次開工（依序執行）
+
+需要 4 個視窗：序列埠（VS Code Serial Monitor）、筆電 PowerShell × 3。
+
+**① 板子開機 → 序列埠（COM11，115200）登入 `root`，設定網路**
+```bash
+sh /root/edge-gesture-control/board/bringup.sh
+```
+- 會看到 `usb : OK ...`（或 `already up`）；需要上網時，Wi-Fi 那一行要有 IP。
+- 做完之後，DEBUG 線可以拔掉，SSH 走的是 USB 直連。
+
+**② 筆電 PowerShell #1：啟動 MQTT broker（保持開著）**
+```powershell
+cd C:\Users\user\Desktop\NXP\edge-gesture-control
+& "C:\Program Files\mosquitto\mosquitto.exe" -v -c .\pc\mosquitto.conf
+```
+
+**③ 筆電 PowerShell #2：啟動接收端**
+```powershell
+cd C:\Users\user\Desktop\NXP\edge-gesture-control
+py -3.11 .\pc\hand_listener.py
+```
+
+**④ 筆電 PowerShell #3：SSH 進板子，開始辨識**
+```powershell
+ssh root@192.168.7.2
+```
+```bash
+cd /root/edge-gesture-control/board
+python3 hand_cam.py --mqtt 192.168.7.1
+```
+
+**⑤ 瀏覽器看畫面**：http://192.168.7.2:8080
+
+站遠一點時，先把**手掌張開、舉到臉旁邊**，讓系統找到手（出現青色 `track` 框），再比其他手勢。
+
+結束時：在 ④ 按 `Ctrl+C`；要關機的話在板子上執行 `poweroff`，等 10 秒再拔電。
+
+### 改了程式之後
+
+在筆電執行，位置在 repo 根目錄：
 
 ```powershell
-# 1. 筆電：把 board/ 複製到板子（預設 192.168.7.2；其他 IP 用 -BoardIp）
-.\scripts\deploy_board.ps1
+# 整個 board/ 傳到板子（有新檔案、模型時用這個）
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy_board.ps1
 
-# 2. 板子（ssh root@192.168.7.2）
-cd /root/edge-gesture-control/board
-python3 hand_cam.py            # NPU 推論 + 串流
+# 只改了一個檔案時
+scp board/hand_cam.py root@192.168.7.2:/root/edge-gesture-control/board/
 
-# 3. 筆電瀏覽器打開 http://192.168.7.2:8080
+# 跟隊友同步
+git pull                    # 先拿最新的
+git add -A
+git commit -m "說明這次改了什麼"
+git push
 ```
+
+### `hand_cam.py` 常用參數
+
+| 指令 | 用途 |
+| --- | --- |
+| `python3 hand_cam.py` | 預設：NPU + 串流 :8080 |
+| `python3 hand_cam.py --mqtt 192.168.7.1` | 同時把手部、手勢、人物資料送到筆電 |
+| `python3 hand_cam.py --debug` | 畫出除錯用的框（被否決的偵測框、在人物附近找手的範圍） |
+| `python3 hand_cam.py --image test_images/hand-1.jpg` | 單張圖片測試，結果存到 `output/` |
+| `python3 hand_cam.py --delegate cpu` | 改用 CPU 跑（跟 NPU 比較，demo 用） |
+| `python3 hand_cam.py --mirror` | 畫面左右翻轉 |
+| `python3 hand_cam.py --no-track` / `--no-person-search` / `--person-every 0` | 關掉手部追蹤 / 人物附近找手 / 人物偵測（比較用） |
+| `python3 hand_cam.py -h` | 所有參數 |
+
+終端機每 2 秒印一行統計，欄位意思見下方「辨識流程」。
+
+### 板子上常用
+
+```bash
+ip -4 addr show usb0 mlan0            # 看 USB 直連和 Wi-Fi 的 IP
+cat /sys/class/udc/ci_hdrc.0/state     # USB 直連狀態，正常是 configured
+ping -c 2 8.8.8.8                      # 能不能上網
+ping -c 1 pypi.org                     # 網址解析 (DNS) 正不正常
+v4l2-ctl --list-devices                # 鏡頭節點（C270 = /dev/video2）
+ls /dev/ethosu0                        # NPU 在不在
+python3 -m pip install <套件>          # 安裝 Python 套件（板子要能上網）
+reboot / poweroff                      # 重開機 / 關機
+```
+
+Wi-Fi 卡住（`bringup.sh` 顯示 `not associated`，但熱點明明開著）時，依序執行：
+```bash
+killall wpa_supplicant
+sleep 2; rm -f /var/run/wpa_supplicant/mlan0
+ip link set mlan0 down; ip link set mlan0 up
+sh /root/edge-gesture-control/board/bringup.sh
+```
+
+### 筆電上常用
+
+```powershell
+ping 192.168.7.2                                         # 連不連得到板子
+Get-NetAdapter | Where-Object InterfaceDescription -like "*Ncm*"   # USB 直連網卡在不在
+Get-NetTCPConnection -LocalPort 1883 -State Listen       # broker 有沒有在跑（沒有輸出 = 沒在跑）
+Get-Service mosquitto                                    # 要是 Stopped；Running 會佔住 1883 埠
+py -3.11 -m pip install <套件>                            # 安裝 Python 套件
+```
+
+| 狀況 | 處理 |
+| --- | --- |
+| `hand_listener.py` 出現 `No module named 'paho'` | 用了 `python3`，改用 `py -3.11` |
+| `hand_listener.py` 出現 `ConnectionRefusedError` | broker 沒開，先做「每次開工」的 ② |
+| `ssh` 連不上 | 板子重開過？到序列埠執行 `bringup.sh`；看 A 對 C 線是否接在筆電 USB-A ↔ 板子 `USB1_C` |
+| `deploy_board.ps1` 無法執行 | 用上面的 `powershell -ExecutionPolicy Bypass -File ...` |
 
 ---
 

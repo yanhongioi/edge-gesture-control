@@ -332,30 +332,33 @@ python3 hand_cam.py -h                 # 所有參數
 
 ---
 
-## 步驟 9（選用）：把 21 點座標送到筆電
+## 步驟 9：把資料送到筆電（MQTT）
 
-之後做手勢判斷、游標控制時會需要這個。
+板子會把手部 21 點、手勢、人物資訊送到筆電，之後做手勢觸發、游標控制都要用到。訊息格式見 README 的「MQTT topics」。
 
-1. **筆電安裝並啟動 Mosquitto**（[下載](https://mosquitto.org/download/)），使用 repo 裡的設定檔（允許外部連線）：
+> 筆電上的 Python 請一律用 `py -3.11`。`python3` 可能會跑到 MSYS2 的 Python，那裡沒有這些套件。
+
+**第一次設定（每台筆電做一次）**
+
+1. 安裝 Mosquitto（MQTT broker）和 Python 套件：
    ```powershell
-   & "C:\Program Files\Mosquitto\mosquitto.exe" -v -c .\pc\mosquitto.conf
+   winget install --id EclipseFoundation.Mosquitto -e
+   py -3.11 -m pip install -r pc\requirements.txt
    ```
-2. **防火牆開 1883 port**（用系統管理員身分開 PowerShell）：
+2. 防火牆只對 USB 直連網卡開放 1883 埠（**系統管理員** PowerShell；`乙太網路 7` 換成你的網卡名稱，見步驟 3-D）。`pc/mosquitto.conf` 允許不用帳密就能連線，所以不要對所有網路開放：
    ```powershell
-   New-NetFirewallRule -DisplayName "MQTT 1883" -Direction Inbound -Protocol TCP -LocalPort 1883 -Action Allow
+   New-NetFirewallRule -DisplayName "MQTT 1883 (USB board link)" -Direction Inbound -Protocol TCP -LocalPort 1883 -InterfaceAlias "乙太網路 7" -Action Allow
    ```
-3. **筆電執行接收端**：
+3. 安裝程式可能會建立一個自動啟動的 Mosquitto 服務，它只接受本機連線，而且會佔住 1883 埠。如果 `Get-Service mosquitto` 顯示 `Running`，用系統管理員 PowerShell 停掉它：
    ```powershell
-   pip install -r pc\requirements.txt
-   python pc\hand_listener.py
+   Stop-Service mosquitto; Set-Service mosquitto -StartupType Manual
    ```
-4. **板子**（`--mqtt` 後面填筆電的 IP：USB 直連是 `192.168.7.1`，網路線是 `192.168.10.1`）：
+4. 板子安裝 Python 套件（板子要能上網；如果出現 `Temporary failure in name resolution`，是 DNS 的問題，先執行 `bringup.sh`）：
    ```bash
-   python3 hand_cam.py --mqtt 192.168.7.1
+   python3 -m pip install paho-mqtt
    ```
-   注意：我們板子上的系統沒有 `paho-mqtt`，要先安裝（見 [README 的「板子狀態」](../README.md#板子狀態) 的進度清單）。
 
-筆電會即時印出手腕和五個指尖的座標。每筆 MQTT 訊息的格式請見 README。
+**每次使用**：照 README「指令區 → 每次開工」的順序：broker → 接收端 → 板子加 `--mqtt 192.168.7.1`。接收端會即時顯示 FPS、人物 `dx`、手的來源、確認過的手勢，以及手腕和食指的座標。
 
 ---
 
@@ -363,6 +366,9 @@ python3 hand_cam.py -h                 # 所有參數
 
 | 狀況 | 原因 / 解法 |
 | --- | --- |
+| `No module named 'paho'`（筆電） | 用了 `python3`，改用 `py -3.11` |
+| `ConnectionRefusedError`（筆電接收端） | broker 沒開，先啟動 `mosquitto.exe -v -c .\pc\mosquitto.conf` |
+| `ModuleNotFoundError: No module named 'gesture'`（板子） | `board/gesture.py` 沒有傳到板子，用 `deploy_board.ps1` 傳整個 `board/` |
 | `Tensor N is invalidly specified in schema`（`required_bytes <= bytes`） | 舊版 Vela 編出來的模型，新版 TFLite (2.16+) 不接受。在 PC 執行 `python scripts/fix_vela_scratch.py <模型>_vela.tflite` 修正後，再重新傳到板子。repo 裡的模型已經修過；**板子上 `/root/hand-demo/model/` 的原版模型沒有修**。 |
 | `Failed to load delegate` | 官方 `app.py` 預設的 `vx` 是 i.MX8MP 的 delegate，i.MX93 要用 `ethosu`。`hand_cam.py` 預設已經是 NPU (ethosu)。 |
 | `找不到 USB 鏡頭` | `v4l2-ctl --list-devices` 查到節點後，用 `--device /dev/videoX` 指定。 |
