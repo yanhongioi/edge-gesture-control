@@ -25,6 +25,17 @@ else
     fi
 fi
 
+# ------------------------------------------------------------------ DNS
+# 這個系統的 /etc/resolv.conf 原本是連到 ConnMan 的本機 DNS 轉發器 (127.0.0.1)，
+# 但我們的 Wi-Fi 是手動連的，ConnMan 不知道上游 DNS，網址會解析失敗。改成固定的公開 DNS。
+if [ -L /etc/resolv.conf ] || ! grep -q "^nameserver [0-9]" /etc/resolv.conf 2>/dev/null \
+   || grep -q "^nameserver 127\." /etc/resolv.conf; then
+    [ -L /etc/resolv.conf ] && [ ! -e /etc/resolv.conf.connman-link ] && cp -P /etc/resolv.conf /etc/resolv.conf.connman-link
+    rm -f /etc/resolv.conf
+    printf 'nameserver 8.8.8.8\nnameserver 1.1.1.1\n' > /etc/resolv.conf
+    echo "dns : fixed /etc/resolv.conf (8.8.8.8, 1.1.1.1)"
+fi
+
 # ------------------------------------------------------------------ Wi-Fi (只讓板子上網)
 if [ ! -f "$CONF" ]; then
     echo "wifi: no $CONF, skipped (see docs/setup.md 3-A)"

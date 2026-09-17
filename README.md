@@ -78,7 +78,9 @@ python3 hand_cam.py            # NPU 推論 + 串流
 | NPU | `/dev/ethosu0` ✅，delegate `/usr/lib/libethosu_delegate.so` ✅ |
 | Python / TFLite | python 3.13；`tflite_runtime` 2.19.0 ✅（會出現 deprecated 警告，不影響執行）、`ai_edge_litert` ✅ |
 | OpenCV | 4.12.0 ✅ |
-| `paho-mqtt` | ❌ 沒有安裝（這不是官方的 MQTT image）|
+| `paho-mqtt` | 2.1.0 ✅（2026-09-17 用 pip 安裝；系統原本沒有，因為這不是官方的 MQTT image）|
+| DNS | `/etc/resolv.conf` 原本連到 ConnMan 的本機 DNS 轉發器，但我們手動連的 Wi-Fi 不歸 ConnMan 管，所以網址解析失敗。已改成固定的 `8.8.8.8`、`1.1.1.1`（原連結備份在 `/etc/resolv.conf.connman-link`），`bringup.sh` 也會自動檢查 |
+| ConnMan | 正在執行（`systemctl is-active connman` = active）。目前沒有用它管網路；如果 Wi-Fi 或 USB 網路又出現莫名的問題，考慮讓它忽略 `mlan0`、`usb0` |
 | 我們的程式 | `/root/edge-gesture-control/board/` |
 | 官方手部範例 | `/root/hand-demo/`（隊友放的 WPI 原版）。**裡面的 `_vela` 模型在 TFLite 2.19 無法載入**，請用 repo 裡修正過的版本 |
 
@@ -208,7 +210,8 @@ C270 640×480
 
 **主線（下一步）**：MQTT 打通 → 手勢分類 → PC 控制 → 防誤觸 / 回饋音
 
-- [ ] 在板子上安裝 `paho-mqtt`，打通 MQTT（板子 → 筆電）
+- [x] 在板子上安裝 `paho-mqtt`
+- [ ] 筆電安裝 Mosquitto，打通 MQTT（板子 → 筆電）
 - [ ] 手勢分類：從 21 個點判斷手勢，包含「起手式」（手舉到臉旁邊）
 - [ ] PC 控制原語（捲動、快捷鍵），收到手勢就執行
 - [ ] 防誤觸：手勢維持一段時間才觸發、冷卻時間、提示音
@@ -264,6 +267,7 @@ C270 640×480
 - **Wi-Fi 卡在 SCANNING，找不到熱點**：舊版 `bringup.sh` 在同一張網卡上啟動了第二個 `wpa_supplicant`。新版腳本已經不會重複啟動；遇到時請照「板子重開機後要重做的事」裡的四行重設。
 - **Android 熱點在沒有裝置連線時會自動關閉**，重新開啟後 BSSID 和頻道都會改變。建議在手機上關掉「自動關閉熱點」。
 - `dmesg` 裡的 `ethosu: can't change firmware ...`：每次啟動 NPU 程式都會出現，可以忽略。
+- **pip 安裝失敗：`Temporary failure in name resolution`**（ping 8.8.8.8 卻是通的）：DNS 的問題，見「系統與軟體」的 DNS 那一列。
 - 板子的時鐘不準（檔案日期顯示 9/5），開機後沒有自動校時。如果之後遇到 SSL 或憑證錯誤，先檢查 `date`。
 
 ---

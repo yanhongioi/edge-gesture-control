@@ -17,12 +17,15 @@ def on_connect(client, userdata, flags, reason_code, properties=None):
 
 def on_message(client, userdata, msg):
     data = json.loads(msg.payload)
+    person = data.get("person")
+    ptxt = f"person dx {person['dx']:+.2f}" if person else "no person"
     if not data["hands"]:
-        print(f"\rfps {data['fps']:5.1f}  no hand" + " " * 60, end="")
+        print(f"\rfps {data['fps']:5.1f}  {ptxt}  no hand" + " " * 70, end="")
         return
-    lm = data["hands"][0]["landmarks"]            # 21 個 [x, y, z]，x/y 為 0~1
+    hand = data["hands"][0]
+    lm = hand["landmarks"]                        # 21 個 [x, y, z]，x/y 為 0~1
     text = "  ".join(f"{NAMES[i]}({lm[i][0]:.2f},{lm[i][1]:.2f})" for i in NAMES)
-    print(f"\rfps {data['fps']:5.1f}  {text}", end="")
+    print(f"\rfps {data['fps']:5.1f}  {ptxt}  [{hand.get('source', '?'):6s}] {text}", end="")
 
 
 try:
