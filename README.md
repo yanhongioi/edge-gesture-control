@@ -15,11 +15,12 @@
 ```text
 edge-gesture-control/
 ├── board/                    # 跑在 FRDM-i.MX93 上（整個資料夾 scp 到板子）
-│   ├── hand_cam.py           # C270 → 手部偵測 + 21 點骨架 + 人物定位 → HTTP 串流 / HDMI / MQTT
+│   ├── hand_cam.py           # C270 → 手部偵測 + 21 點骨架 + 手勢 + 人物定位 → HTTP 串流 / HDMI / MQTT
+│   ├── gesture.py            # 從 21 點判斷手勢（open / point），附連續幀確認
 │   ├── bringup.sh            # 開機後一行設定好網路（USB 直連 + Wi-Fi）
 │   ├── usb_net.sh            # 把 USB1_C 設成 USB 網卡，讓筆電直連 (192.168.7.2)
 │   ├── models/               # 手部、人物模型（原始 + Vela 編譯版 + Vela 報告）
-│   └── test_images/          # 單張圖片測試用
+│   └── test_images/          # 單張圖片測試用（張開手掌、握拳、指東西）
 ├── pc/                       # 跑在 Windows 筆電
 │   ├── hand_listener.py      # 接收板子送來的 21 點座標 (MQTT edge/hand)
 │   ├── mosquitto.conf        # MQTT broker 設定（允許外部連線）
@@ -174,6 +175,8 @@ C270 640×480
  └─ 手部偵測（只在沒追到手時）
       一幀看全畫面、一幀看人物上半身附近，兩者輪流
       分數 ≥ 0.55 的框，最多試 2 個 → 骨架模型，分數 ≥ 0.7 才採用 → 開始追蹤
+ └─ 手勢（每隻手、每幀）：gesture.py 用手指關節角度判斷 open / point
+      每隻被追蹤的手有自己的計數器，同一個手勢連續 4 幀才確認
 → 畫面串流 http://192.168.7.2:8080、MQTT edge/hand
 ```
 
@@ -207,12 +210,14 @@ C270 640×480
 - [x] 手部追蹤：找到手之後只跑骨架模型，追蹤中的門檻是 0.55
 - [x] 沒追到手時，偵測也會看人物附近，遠距離比較容易找到手
 - [x] `--debug` 才畫除錯用的框；Ctrl+C 可以正常結束
+- [x] 手勢分類 `board/gesture.py`（隊友，PR #1）：用手指關節夾角判斷每根手指伸直或彎曲，歸類成 `open`（手掌張開）、`point`（只伸食指）；同一個手勢連續 4 幀才確認，確認次數會跟著追蹤延續
 
 **主線（下一步）**：MQTT 打通 → 手勢分類 → PC 控制 → 防誤觸 / 回饋音
 
 - [x] 在板子上安裝 `paho-mqtt`
-- [ ] 筆電安裝 Mosquitto，打通 MQTT（板子 → 筆電）
-- [ ] 手勢分類：從 21 個點判斷手勢，包含「起手式」（手舉到臉旁邊）
+- [x] 筆電安裝 Mosquitto，打通 MQTT（板子 → 筆電），`pc/hand_listener.py` 收得到手部、手勢、人物資料
+- [ ] 上板驗證手勢：先張開手掌讓系統找到手，追蹤中再改比 `point`，看能不能正確判斷
+- [ ] 更多手勢（握拳、左右滑等）；「起手式」＝張開手掌舉到臉旁邊
 - [ ] PC 控制原語（捲動、快捷鍵），收到手勢就執行
 - [ ] 防誤觸：手勢維持一段時間才觸發、冷卻時間、提示音
 
@@ -261,6 +266,11 @@ C270 640×480
 ### 已知問題
 
 - **官方 Vela 模型載入失敗**（`Tensor 8 is invalidly specified in schema`）：舊版 Vela 讓 `*_scratch_fast` tensor 指向一個空的 buffer，TFLite 2.19 會拒絕載入。repo 裡的三個 `_vela.tflite` 都已經用 `scripts/fix_vela_scratch.py` 修正。板子上 `/root/hand-demo/` 的原版沒有修。
+- **非張開手掌的姿勢（握拳、指東西）不容易被找到**（2026-09-17，隊友的測試圖）：
+  - `fist.jpg`、`point_2.jpg`：手部偵測直接找不到手。
+  - `point_1.JPG`：有找到手，但偵測框只框住拳頭，`expand_box()` 往上只多留 20%，伸直的食指被切在框外，骨架整個畫錯，手勢判斷成 `null`。分類規則本身沒有問題。
+  - 以前沒發現，是因為之前測的都是張開的手掌。
+  - 追蹤中的裁切框是依骨架範圍放大 1.8 倍，手指伸出去時會跟著變大，所以「先張開手掌讓系統找到手，再改成其他手勢」應該可行，**待上板確認**。
 - **筆電和板子都連手機熱點時，串流會卡**：畫面要經過手機轉送，ping 61～446 ms，已改用 USB 直連。i.MX93 沒有硬體影像編碼器，只能用 CPU 壓 JPEG。
 - **`g_ether` 在 Windows 上被認成「USB 序列裝置 (COMx)」**，也無法手動改成網卡驅動 → 改用 `usb_net.sh`（NCM）。
 - **C 對 C 線接 `USB1_C` 時辨識不到** → 改用 A 對 C 線接筆電的 USB-A。
@@ -278,8 +288,10 @@ C270 640×480
 | --- | --- | --- |
 | `edge/hand` | 板子 → PC | `{"ts", "fps", "width", "height", "hands": [...], "person": {...} 或 null}` |
 
-- `hands[]`：`{"source", "score", "presence", "box": [x0, y0, x1, y1], "landmarks": [[x, y, z] × 21]}`
+- `hands[]`：`{"source", "score", "presence", "gesture", "gesture_raw", "box": [x0, y0, x1, y1], "landmarks": [[x, y, z] × 21]}`
   - `source`：`"detect"`（這一幀由手部偵測找到）或 `"track"`（沿用上一幀追蹤）。
+  - `gesture`：確認過的手勢（`"open"`、`"point"` 或 `null`），同一個手勢要連續 4 幀才會出現，之後做觸發請用這個。
+  - `gesture_raw`：這一幀單獨判斷的結果，還沒經過連續幀確認，會跳動，主要給除錯和單張圖片測試用。
 - `person`：`{"score", "box", "center": [x, y], "dx", "dy", "age"}`
   - `dx`、`dy`：人物中心偏離畫面中央的量，範圍 -1～+1，正值代表人在右方或下方。
   - `age`：距離上次偵測到這個人過了幾幀。
