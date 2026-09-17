@@ -23,7 +23,7 @@ edge-gesture-control/
 │   └── test_images/          # 單張圖片測試用（張開手掌、握拳、指東西）
 ├── pc/                       # 跑在 Windows 筆電
 │   ├── hand_listener.py      # 接收板子送來的資料並顯示 (MQTT edge/hand)，除錯用
-│   ├── gesture_control.py    # 收到手勢就控制這台電腦（point = 持續往下捲）
+│   ├── gesture_control.py    # 收到手勢就控制這台電腦（point = 游標跟著食指尖）
 │   ├── mosquitto.conf        # MQTT broker 設定（允許外部連線）
 │   └── requirements.txt
 ├── scripts/
@@ -77,9 +77,9 @@ cd C:\Users\user\Desktop\NXP\edge-gesture-control
 py -3.11 .\pc\hand_listener.py
 ```
 
-　（要用手勢控制電腦時，把 ③ 換成下面這行，或再開一個視窗同時跑；先把滑鼠游標移到要捲動的網頁上）
+　（要用手勢控制電腦時，把 ③ 換成下面這行，或再開一個視窗同時跑）
 ```powershell
-py -3.11 .\pc\gesture_control.py              # 加 --dry-run 只印出動作、不真的捲
+py -3.11 .\pc\gesture_control.py              # 加 --dry-run 只印出動作、不真的控制
 ```
 
 **④ 筆電 PowerShell #3：SSH 進板子，開始辨識**
@@ -88,8 +88,9 @@ ssh root@192.168.7.2
 ```
 ```bash
 cd /root/edge-gesture-control/board
-python3 hand_cam.py --mqtt 192.168.7.1
+python3 hand_cam.py --mqtt 192.168.7.1 --mqtt-hz 30
 ```
+`--mqtt-hz 30`：每秒送 30 次（預設 15 次），游標才會順。
 
 **⑤ 瀏覽器看畫面**：http://192.168.7.2:8080
 
@@ -101,17 +102,27 @@ python3 hand_cam.py --mqtt 192.168.7.1
 
 | 手勢（確認過的 `gesture`） | 動作 |
 | --- | --- |
-| `point`（只伸食指） | 維持期間持續慢慢往下捲（滑鼠滾輪），換手勢、手不見、或 0.5 秒沒收到資料就停 |
+| `point`（只伸食指） | **游標模式**：滑鼠游標跟著食指尖（第 8 點）移動。這一幀一不是 `point`、手不見，或 0.5 秒沒收到資料，就立刻停止，並把游標退回約 3 筆資料之前的位置（收手時食指在彎，最後幾筆位置不準） |
 
 ```powershell
-py -3.11 .\pc\gesture_control.py --scroll-step 60      # 捲快一點（120 = 滾輪一格，預設 30）
-py -3.11 .\pc\gesture_control.py --interval 0.1        # 捲動間隔變長（預設 0.05 秒）
-py -3.11 .\pc\gesture_control.py --broker <IP>         # broker 在別台電腦
+py -3.11 .\pc\gesture_control.py --region 0.3         # 手移動更小的範圍就能走遍整個螢幕（預設 0.4）
+py -3.11 .\pc\gesture_control.py --center-y 0.4       # 對應範圍往上移（手習慣舉高一點時）
+py -3.11 .\pc\gesture_control.py --min-cutoff 0.5     # 游標更穩但更黏（預設 1.0）
+py -3.11 .\pc\gesture_control.py --beta 0.01          # 快速移動時更跟手（預設 0.005）
+py -3.11 .\pc\gesture_control.py --no-mirror          # 板子有加 --mirror 時要加
+py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
 ```
 
-- 捲動作用在**滑鼠游標底下的視窗**。
-- 要新增手勢對應，在檔案裡的 `CONTINUOUS` 表加一行即可。
-- 手勢要連續 4 幀才會確認，所以從比出手勢到開始動作，大約需要 0.13 秒；換手勢時也會多延續這麼一點時間。
+游標模式的設計（對應 `plan.md` 技術細節 2～4）：
+- **對應方式**：絕對對應，只取鏡頭畫面**中央 40%** 的範圍對應到整個主螢幕，超出範圍時游標會停在螢幕邊緣。預設左右翻轉，因為鏡頭是面對人拍的。
+- **防抖動**：用 One Euro 濾波。模擬測試中，靜止時 ±14 px 的抖動降到 ±6 px；以 1000 px/s 移動時延遲約 18 px。
+- **開始和結束**：開始要等手勢確認（連續 4 幀）；結束看的是這一幀的判斷，避免收手的那幾幀讓游標飄走。
+- **顯示縮放**：程式會設定成使用實際像素座標，125% 或 150% 縮放時位置也對得準。只控制主螢幕。
+- **還沒做**：
+  - 點擊手勢（要處理點擊瞬間游標飄移的問題，`plan.md` 第 4 點）。
+  - 裝上雲台後，改用「手相對於人物框」的位置。
+- 比 `point` 時，實體滑鼠會被覆蓋；手勢放開就會交還。
+- 捲動函式 `scroll_down` / `scroll_up` 還留在程式裡，之後有新手勢時，加進 `CONTINUOUS` 表即可使用。
 
 ### 用另一台電腦接收 / 被控制
 
@@ -355,10 +366,11 @@ C270 640×480
 
 - [x] 在板子上安裝 `paho-mqtt`
 - [x] 筆電安裝 Mosquitto，打通 MQTT（板子 → 筆電），`pc/hand_listener.py` 收得到手部、手勢、人物資料
-- [x] PC 控制：`pc/gesture_control.py`，`point` → 持續慢慢往下捲（PC 上用模擬訊息測過，**待實機驗證**）
+- [x] PC 控制：`pc/gesture_control.py`，`point` → 游標跟著食指尖（One Euro 濾波、中央 40% 對應整個螢幕、收手時退回）。PC 上用單元測試和模擬訊息測過，**待實機驗證**
 - [ ] 上板驗證手勢：先張開手掌讓系統找到手，追蹤中再改比 `point`，看能不能正確判斷
 - [ ] 更多手勢（握拳、左右滑等）；「起手式」＝張開手掌舉到臉旁邊
-- [ ] 更多 PC 控制（往上捲、快捷鍵、暫停 / 播放）
+- [ ] 點擊手勢（點擊瞬間鎖住游標位置）
+- [ ] 更多 PC 控制（捲動、快捷鍵、暫停 / 播放），對應到新手勢
 - [ ] 防誤觸：手勢維持一段時間才觸發、冷卻時間、提示音
 
 **之後再做**
