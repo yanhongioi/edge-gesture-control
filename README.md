@@ -214,6 +214,8 @@ ping -c 2 8.8.8.8                      # 能不能上網
 ping -c 1 pypi.org                     # 網址解析 (DNS) 正不正常
 v4l2-ctl --list-devices                # 鏡頭節點（C270 = /dev/video2）
 ls /dev/ethosu0                        # NPU 在不在
+arecord -l                             # 錄音裝置（C270 麥克風 = card WEBCAM）
+arecord -D plughw:CARD=WEBCAM,DEV=0 -f S16_LE -r 16000 -c 1 -d 5 -V mono /tmp/mic_test.wav   # 錄 5 秒測試
 python3 -m pip install <套件>          # 安裝 Python 套件（板子要能上網）
 reboot / poweroff                      # 重開機 / 關機
 ```
@@ -272,6 +274,7 @@ py -3.11 -m pip install <套件>                            # 安裝 Python 套�
 | 介面 | 名稱 / 節點 | 備註 |
 | --- | --- | --- |
 | C270 鏡頭 | **`/dev/video2`**（影像）、`/dev/video3`（metadata，不能用） | 插在 USB-A 孔 |
+| C270 麥克風 | ALSA 第 1 張卡 `WEBCAM`（`plughw:CARD=WEBCAM,DEV=0`） | 2026-09-18 測試錄音清楚。第 0 張 `mqsaudio` 是板子的音訊輸出 |
 | 板上 MIPI 鏡頭介面 | `/dev/video0`、`/dev/video1`（`mxc-isi-cap`） | 沒有使用 |
 | 有線網路 | `eth0`、`eth1` | 沒有接 |
 | Wi-Fi | `mlan0` | 開機就有，不需要 `modprobe` |
