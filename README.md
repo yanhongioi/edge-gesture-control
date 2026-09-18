@@ -18,6 +18,8 @@ edge-gesture-control/
 │   ├── hand_cam.py           # C270 → 手部偵測 + 21 點骨架 + 手勢 + 人物定位 → HTTP 串流 / HDMI / MQTT
 │   ├── gesture.py            # 從 21 點判斷手勢（10 種）和捏合，附連續幀確認（隊友的分支 gesture-classification）
 │   ├── bringup.sh            # 開機後一行設定好網路（USB 直連 + Wi-Fi）
+│   ├── servo.py              # MG996R 伺服馬達（雲台）：pin 33 硬體 PWM，用角度控制
+│   ├── voice/                # 語音：NXP AFE + VIT 喚醒詞 / 指令（C270 麥克風），結果送 MQTT edge/voice
 │   ├── usb_net.sh            # 把 USB1_C 設成 USB 網卡，讓筆電直連 (192.168.7.2)
 │   ├── models/               # 手部、人物模型（原始 + Vela 編譯版 + Vela 報告）
 │   └── test_images/          # 單張圖片測試用（張開手掌、握拳、指東西）
@@ -214,6 +216,7 @@ ping -c 2 8.8.8.8                      # 能不能上網
 ping -c 1 pypi.org                     # 網址解析 (DNS) 正不正常
 v4l2-ctl --list-devices                # 鏡頭節點（C270 = /dev/video2）
 ls /dev/ethosu0                        # NPU 在不在
+python3 /root/edge-gesture-control/board/servo.py 90     # 雲台轉到 90 度（sweep = 掃一次；off = 放鬆）
 arecord -l                             # 錄音裝置（C270 麥克風 = card WEBCAM）
 arecord -D plughw:CARD=WEBCAM,DEV=0 -f S16_LE -r 16000 -c 1 -d 5 -V mono /tmp/mic_test.wav   # 錄 5 秒測試
 python3 -m pip install <套件>          # 安裝 Python 套件（板子要能上網）
@@ -274,7 +277,8 @@ py -3.11 -m pip install <套件>                            # 安裝 Python 套�
 | 介面 | 名稱 / 節點 | 備註 |
 | --- | --- | --- |
 | C270 鏡頭 | **`/dev/video2`**（影像）、`/dev/video3`（metadata，不能用） | 插在 USB-A 孔 |
-| C270 麥克風 | ALSA 第 1 張卡 `WEBCAM`（`plughw:CARD=WEBCAM,DEV=0`） | 2026-09-18 測試錄音清楚。第 0 張 `mqsaudio` 是板子的音訊輸出 |
+| C270 麥克風 | ALSA 第 1 張卡 `WEBCAM`（`plughw:CARD=WEBCAM,DEV=0`） | 2026-09-18 測試錄音清楚。增益用 8（0～16；16 會爆音）。第 0 張 `mqsaudio` 是板子的音訊輸出 |
+| 伺服馬達 MG996R（雲台） | 訊號 = 排針 **pin 33 = GPIO_IO13** = 硬體 PWM **`pwmchip1` channel 2**（2026-09-18 實測） | 50 Hz；500 µs = 0°、2500 µs = 180°（可用 `servo.py --min-us/--max-us` 校準）。GPIO_IO04、GPIO_IO12 在 `pwmchip0`（`424e0000.pwm`），也是 PWM 腳 |
 | 板上 MIPI 鏡頭介面 | `/dev/video0`、`/dev/video1`（`mxc-isi-cap`） | 沒有使用 |
 | 有線網路 | `eth0`、`eth1` | 沒有接 |
 | Wi-Fi | `mlan0` | 開機就有，不需要 `modprobe` |
@@ -289,6 +293,7 @@ py -3.11 -m pip install <套件>                            # 安裝 Python 套�
 | POWER（USB-C） | 筆電 **USB-C**（C 對 C 線） | 供電，目前沒有重開機的情況；demo 前要改用充電器 |
 | USB-A | C270 | 鏡頭 |
 | **`USB1_C`** | 筆電 **USB-A**（A 對 C 線） | USB 直連網路。用 C 對 C 線接時辨識不到 |
+| 排針 pin 33（GPIO_IO13） | MG996R 訊號線（橘） | 馬達電源（紅）接**獨立的 4 顆 3 號電池**（約 6 V），電池負極、馬達負極（棕）和板子 GND 在麵包板上共地。**電池正極絕對不能碰到板子**；MG996R 瞬間電流可到 1～2.5 A，不能從板子取電 |
 | RJ45 × 2、HDMI | （空） | 目前沒有網路線和 HDMI 線 |
 
 序列埠：用 VS Code Serial Monitor，115200 8N1，切換到 Terminal Mode。**貼上多行指令會亂掉，要一次貼一行。**
@@ -412,7 +417,9 @@ C270 640×480
 
 **之後再做**
 
-- [ ] 雲台持續追人（人物定位已完成，剩下舵機控制：把 `dx` 拉回 0）。設計（2026-09-17 決定）：
+- [x] 伺服馬達 MG996R 可以用硬體 PWM 控制（pin 33 = `pwmchip1` channel 2），`board/servo.py`
+- [ ] 語音：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），**待上板測試**
+- [ ] 雲台持續追人（人物定位、馬達控制都有了，剩下把 `dx` 接到馬達：把 `dx` 拉回 0）。設計（2026-09-17 決定）：
   - **人物偵測**：`detect_ssdmobilenetv3_quant`（來自 MobileNetSSD_VehicleHumanDetector）。正面、側面、背面都偵測得到，用人物框中心的 x 算雲台要轉的角度，讓人保持在畫面中央。
   - **手勢**：在這個穩定的畫面裡持續跑，不是兩種模式輪流切換。三個模型輪流使用 NPU，各自的 SRAM 都在 384 KB 以內，不會衝突。
   - **游標座標**：改用「手相對於人物框」的位置，不受鏡頭轉動影響。
