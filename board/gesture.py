@@ -54,15 +54,27 @@ def finger_states(pts):
     return states
 
 
+# 每種手勢 = 一組「伸直的手指」，跟角度門檻、方向都無關，純粹查表。
+# ok：拇指和食指互相彎過去捏在一起 (兩者都判定為彎曲)，中指/無名指/小指伸直。
+GESTURE_TABLE = {
+    frozenset(): "fist",
+    frozenset({"thumb"}): "thumbs_up",
+    frozenset({"index"}): "point",
+    frozenset({"index", "middle"}): "two",
+    frozenset({"index", "middle", "ring"}): "three",
+    frozenset({"index", "middle", "ring", "pinky"}): "four",
+    frozenset({"thumb", "pinky"}): "six",
+    frozenset({"index", "pinky"}): "rock",
+    frozenset({"middle", "ring", "pinky"}): "ok",
+    frozenset({"thumb", "index", "middle", "ring", "pinky"}): "open",
+}
+
+
 def classify_landmarks(pts):
-    """回傳 "open"、"point" 或 None (無法歸類的手勢/姿勢)。"""
+    """回傳 GESTURE_TABLE 裡的手勢名稱，或 None (沒有定義成任何手勢的手指組合)。"""
     states = finger_states(pts)
-    four = (states["index"], states["middle"], states["ring"], states["pinky"])
-    if all(four) and states["thumb"]:
-        return "open"
-    if states["index"] and not states["middle"] and not states["ring"] and not states["pinky"]:
-        return "point"
-    return None
+    extended = frozenset(name for name, is_extended in states.items() if is_extended)
+    return GESTURE_TABLE.get(extended)
 
 
 class GestureSmoother:
