@@ -146,6 +146,56 @@ def debug_features(pts):
     }
 
 
+# --------------------------------------------------------------------------------------
+# 捏合 (pinch)：比 point 時用拇指「扣扳機」= 按下滑鼠
+#   手槍姿勢：食指指出去、拇指立起來 = 沒按 (瞄準)；拇指往下壓，碰到食指側邊 = 捏下 (按住)
+#   point 的分類本來就不看拇指，所以捏下時手勢仍然是 point，游標可以繼續跟著食指尖走
+#   判斷：拇指指尖到「食指根部 (MCP) 到第一指節 (PIP)」這段骨頭的距離 / 手掌大小 (手腕到中指根部)
+# --------------------------------------------------------------------------------------
+# 門檻是初始值，要用真實鏡頭校準 (MQTT 的 hands[].pinch_ratio 會送出即時比例)：
+#   比例 < PINCH_ON_RATIO 連續幾幀 → 捏下；> PINCH_OFF_RATIO 連續幾幀 → 放開；中間是遲滯區，避免在門檻附近閃爍
+PINCH_ON_RATIO = 0.25
+PINCH_OFF_RATIO = 0.35
+PINCH_FRAMES = 2
+
+
+def _point_segment_dist(p, a, b):
+    """點 p 到線段 ab 的最短距離"""
+    p, a, b = (np.asarray(v, dtype=np.float32) for v in (p, a, b))
+    ab = b - a
+    denom = float(np.dot(ab, ab))
+    t = 0.0 if denom < 1e-9 else float(np.clip(np.dot(p - a, ab) / denom, 0.0, 1.0))
+    return float(np.linalg.norm(p - (a + t * ab)))
+
+
+def pinch_ratio(pts):
+    """拇指指尖到食指 MCP-PIP 線段的距離 / 手掌大小；手掌大小算不出來時回傳 None"""
+    pts = np.asarray(pts, dtype=np.float32)
+    palm_size = _dist(pts[WRIST], pts[MIDDLE_MCP])
+    if palm_size < 1e-6:
+        return None
+    return _point_segment_dist(pts[THUMB_TIP], pts[INDEX[0]], pts[INDEX[1]]) / palm_size
+
+
+class PinchDetector:
+    """捏合狀態 (遲滯 + 連續幀)：比例 < on 連續 frames 幀才算捏下，> off 連續 frames 幀才算放開"""
+
+    def __init__(self, on=PINCH_ON_RATIO, off=PINCH_OFF_RATIO, frames=PINCH_FRAMES):
+        self.on, self.off, self.frames = on, off, frames
+        self.pinched = False
+        self._streak = 0
+
+    def update(self, ratio):
+        if ratio is None:
+            return self.pinched
+        crossing = ratio > self.off if self.pinched else ratio < self.on
+        self._streak = self._streak + 1 if crossing else 0
+        if self._streak >= self.frames:
+            self.pinched = not self.pinched
+            self._streak = 0
+        return self.pinched
+
+
 class GestureSmoother:
     """避免手勢逐幀閃爍：同一個手勢要連續看到 confirm_frames 次才算確認過，
     確認後才會換成新手勢；中間出現的雜訊 (None 或別的手勢) 不會馬上蓋掉目前的結果。"""
