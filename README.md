@@ -380,7 +380,8 @@ C270 640×480
 - [ ] 用 `benchmark_model` 量 NPU / CPU 推論時間（setup.md 步驟 6），填進效能紀錄
 - [ ] 開機自動執行 `usb_net.sh`（Wi-Fi 會換網路，是否也要自動連線之後再決定）
 - [ ] VS Code Remote-SSH（主機填 `root@192.168.7.2`）
-- [ ] 確認 `hand_cam.py` 開鏡頭時走的是 GStreamer 還是 V4L2（看啟動訊息）
+- [x] `hand_cam.py` 開鏡頭走的是 GStreamer（2026-09-18 上板確認）
+- [ ] HDMI 顯示（`--display`）：第一次上板失敗（找不到 Weston 的 wayland socket），已改成到 `/run/user/*/` 都找、找不到就略過不當掉，**待再測**
 - [ ] 改用充電器供電
 
 **手部與人物辨識**（都已上板驗證，細節見下方調校紀錄）
