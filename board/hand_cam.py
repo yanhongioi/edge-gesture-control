@@ -415,14 +415,26 @@ class MjpegStreamer:
 
 
 def setup_wayland():
-    """從 SSH / 序列埠執行時，讓 cv2.imshow 能畫到板子 HDMI 上的 Weston 桌面"""
-    if os.environ.get("WAYLAND_DISPLAY") or os.environ.get("DISPLAY"):
-        return
-    runtime = os.environ.setdefault("XDG_RUNTIME_DIR", "/run/user/0")
-    sockets = [s for s in glob.glob(os.path.join(runtime, "wayland-*")) if not s.endswith(".lock")]
-    if sockets:
-        os.environ["WAYLAND_DISPLAY"] = os.path.basename(sorted(sockets)[0])
-        print("使用 Wayland 顯示:", os.environ["WAYLAND_DISPLAY"])
+    """從 SSH / 序列埠執行時，讓 cv2.imshow 能畫到板子 HDMI 上的 Weston 桌面。
+    Weston 可能用別的使用者在跑 (socket 在 /run/user/<uid>/)，所以各處都找一遍。
+    找不到就回傳 False (不開 --display)，不然 Qt 會直接讓整個程式 abort。"""
+    if os.environ.get("DISPLAY"):
+        return True
+    if os.environ.get("WAYLAND_DISPLAY"):
+        sock = os.path.join(os.environ.get("XDG_RUNTIME_DIR", ""), os.environ["WAYLAND_DISPLAY"])
+        if os.path.exists(sock):
+            return True
+    sockets = sorted(s for s in glob.glob("/run/user/*/wayland-*") + glob.glob("/run/wayland-*")
+                     if not s.endswith(".lock"))
+    if not sockets:
+        print("找不到 HDMI 桌面 (Weston 的 wayland socket)，這次不開 --display。"
+              "請確認開機前 HDMI 就接好、螢幕上有桌面，再用 systemctl status weston 看 Weston 有沒有在跑")
+        return False
+    os.environ["XDG_RUNTIME_DIR"] = os.path.dirname(sockets[0])
+    os.environ["WAYLAND_DISPLAY"] = os.path.basename(sockets[0])
+    os.environ.setdefault("QT_QPA_PLATFORM", "wayland")
+    print(f"使用 HDMI 桌面: {sockets[0]}")
+    return True
 
 
 class MqttPublisher:
@@ -670,8 +682,8 @@ def main():
     streamer = (MjpegStreamer(args.port, args.stream_scale, args.stream_quality, args.stream_fps)
                 if args.port else None)
     mqtt_pub = MqttPublisher(args.mqtt, args.mqtt_topic, args.mqtt_hz) if args.mqtt else None
-    if args.display:
-        setup_wayland()
+    if args.display and not setup_wayland():
+        args.display = False
     if not streamer and not args.display and not mqtt_pub:
         print("注意：沒開串流/顯示/MQTT，只會在終端機印 FPS")
 
