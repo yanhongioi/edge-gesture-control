@@ -1,13 +1,14 @@
 # --------------------------------------------------------------------------------------
 # PC 端：收到板子確認過的手勢，就控制這台電腦 (Windows)
 #
-#   point         游標跟著食指尖 (第 8 點) 移動
+#   point         游標跟著食指 (預設第一節關節 pip = 第 6 點，--anchor 可改) 移動
 #   point + 捏合   按住左鍵 (手槍姿勢：拇指立起來 = 瞄準，拇指壓下去碰食指 = 扣扳機)
 #                 快速捏一下 = 點擊；捏住不放再移動 = 拖曳；拇指放開 = 放開左鍵
 #                 預先鎖定：拇指一開始靠近食指 (pinch_ratio < --prefreeze)，游標就先鎖住，
 #                 點擊發生在鎖住的位置 (拇指壓下時食指會被帶著晃，這樣晃了也不影響)
-#   two           搖桿式捲動：比出 two 時記下手的高度，手往上抬 = 往上捲、往下放 = 往下捲，
-#                 離起點越遠捲越快，起點附近不動
+#   two           捲動：食指、中指指向上 = 往上捲，指向下 = 往下捲 (橫的 = 暫停)
+#                 速度：基本速度 + 往手指方向推離起點 (比出 two 那一刻的手掌高度) 越遠越快
+#                 短暫掉幀 (--scroll-hold 秒以內) 用原本的速度繼續捲，起點不重算
 #   open / fist / 其他  不動作 (open 是起手式；fist 是拿刀具時的手，永遠不能觸發)
 #
 #   捏合判斷在板子上 (board/gesture.py 的 PinchDetector)，這裡用 MQTT 的 hands[].pinch
@@ -260,32 +261,62 @@ class CursorController:
 
 
 class ScrollJoystick:
-    """two 的搖桿式捲動：比出 two 時記下手掌高度當起點，
-    手往上 = 往上捲、往下 = 往下捲；離起點越遠越快，起點 ±dead 以內不動。"""
+    """two 捲動：
+      方向 = 食指、中指指的方向：指向上 = 往上捲，指向下 = 往下捲，橫的 = 暫停
+      速度 = 基本速度 + 往手指方向推離起點越遠越快 (起點 = 比出 two 那一刻的手掌高度)
+      短暫掉幀 (手不見 / 手勢跳掉) --scroll-hold 秒以內：用原本的速度繼續捲，起點和方向都保留"""
 
     def __init__(self, args):
         self.args = args
-        self.anchor = None
+        self.anchor = None          # 起點 (手掌中心 y，0~1)
         self.rate = 0.0             # 滾輪單位 / 秒 (正 = 往上)
+        self.dir = 0
+        self.lost_since = None
 
-    def update(self, hand):
+    @staticmethod
+    def direction(lm):
+        """食指 + 中指：根部 → 指尖的方向。上 = +1、下 = -1、橫的或算不出來 = 0"""
+        bx, by = (lm[5][0] + lm[9][0]) / 2, (lm[5][1] + lm[9][1]) / 2
+        tx, ty = (lm[8][0] + lm[12][0]) / 2, (lm[8][1] + lm[12][1]) / 2
+        dx, dy = tx - bx, ty - by
+        n = math.hypot(dx, dy)
+        if n < 1e-6:
+            return 0
+        if dy < -0.5 * n:           # 畫面 y 往上變小：指尖在根部上方 = 指向上
+            return 1
+        if dy > 0.5 * n:
+            return -1
+        return 0
+
+    def update(self, hand, t):
         a = self.args
         if hand is None or hand.get("gesture") != SCROLL_GESTURE:
-            if self.anchor is not None:
+            if self.anchor is None:
+                return
+            self.lost_since = self.lost_since or t
+            if t - self.lost_since > a.scroll_hold:
                 print("  ■ 停止捲動")
-            self.anchor, self.rate = None, 0.0
-            return
-        y = sum(hand["landmarks"][i][1] for i in PALM) / len(PALM)
+                self.stop()
+            return                  # 掉幀期間：rate 不變，繼續捲
+        self.lost_since = None
+        lm = hand["landmarks"]
+        y = sum(lm[i][1] for i in PALM) / len(PALM)
         if self.anchor is None:
             self.anchor = y
-            print(f"  ▶ 捲動模式（{SCROLL_GESTURE}）：手往上 = 往上捲，往下 = 往下捲")
-        offset = self.anchor - y                          # 往上抬 = 正 (畫面 y 往上變小)
-        mag = max(0.0, abs(offset) - a.scroll_dead)
-        rate = min(a.scroll_max, a.scroll_gain * mag) * (1 if offset > 0 else -1)
-        self.rate = -rate if a.scroll_invert else rate
+            print(f"  ▶ 捲動模式（{SCROLL_GESTURE}）：手指指向上 = 往上捲，指向下 = 往下捲")
+        d = self.direction(lm)
+        if d != self.dir:
+            print({1: "    ↑ 往上捲", -1: "    ↓ 往下捲", 0: "    ‖ 暫停（手指是橫的）"}[d])
+            self.dir = d
+        if d == 0:
+            self.rate = 0.0
+            return
+        push = (self.anchor - y) if d > 0 else (y - self.anchor)    # 往手指方向推離起點的量
+        speed = min(a.scroll_max, a.scroll_base + a.scroll_gain * max(0.0, push - a.scroll_dead))
+        self.rate = -speed * d if a.scroll_invert else speed * d
 
     def stop(self):
-        self.anchor, self.rate = None, 0.0
+        self.anchor, self.rate, self.dir, self.lost_since = None, 0.0, 0, None
 
 
 def main():
@@ -305,8 +336,8 @@ def main():
                    help="移動小於幾個像素就不動 (手想停住時游標不會閃)")
     g.add_argument("--grace", type=float, default=0.3, help="手勢短暫變成別的，容許幾秒才結束游標模式")
     g = ap.add_argument_group("點擊 (捏合)")
-    g.add_argument("--anchor", choices=list(ANCHORS), default="tip",
-                   help="游標跟哪個點：tip 食指尖 (預設)、pip 食指第一節關節、mcp 食指根部 (越往根部越穩)")
+    g.add_argument("--anchor", choices=list(ANCHORS), default="pip",
+                   help="游標跟哪個點：pip 食指第一節關節 (預設)、tip 食指尖、mcp 食指根部 (越往根部越穩)")
     g.add_argument("--no-click", action="store_true", help="關閉捏合 = 按住左鍵，只移動游標")
     g.add_argument("--prefreeze", type=float, default=0.40,
                    help="pinch_ratio 低於這個值 (拇指正在靠近食指) 就先鎖住游標；0 = 關閉")
@@ -316,10 +347,14 @@ def main():
                    help="捏下後游標先停住幾秒 (這段時間內放開 = 原地點擊)")
     g.add_argument("--release-settle", type=float, default=0.1, help="放開後游標停住幾秒")
     g = ap.add_argument_group("捲動 (two)")
+    g.add_argument("--scroll-base", type=float, default=360,
+                   help="基本捲動速度 (每秒滾輪單位，120 = 一格；預設 360 = 每秒 3 格)")
     g.add_argument("--scroll-gain", type=float, default=12000,
-                   help="捲動速度：手偏離起點 (畫面高度比例) × 這個值 = 每秒滾輪單位 (120 = 一格)")
-    g.add_argument("--scroll-dead", type=float, default=0.04, help="起點上下多少比例以內不捲動")
+                   help="加速：往手指方向推離起點 (畫面高度比例) × 這個值 = 額外的每秒滾輪單位")
+    g.add_argument("--scroll-dead", type=float, default=0.03, help="推離起點多少比例以內不加速")
     g.add_argument("--scroll-max", type=float, default=3000, help="最快每秒幾個滾輪單位")
+    g.add_argument("--scroll-hold", type=float, default=0.5,
+                   help="手或手勢短暫不見時，繼續用原本速度捲幾秒 (起點不重算)")
     g.add_argument("--scroll-invert", action="store_true", help="上下反過來")
     ap.add_argument("--stale", type=float, default=0.5, help="超過幾秒沒收到資料就停止動作")
     ap.add_argument("--dry-run", action="store_true", help="只印出動作，不真的控制電腦")
@@ -351,7 +386,11 @@ def main():
         now = time.monotonic()
         with lock:
             cursor.update(hand, now)
-            scroll.update(hand if cursor.state == "idle" else None)
+            if cursor.state == "idle":
+                scroll.update(hand, now)
+            elif scroll.anchor is not None:               # 換成 point (游標模式)：捲動立刻停
+                print("  ■ 停止捲動（換成游標）")
+                scroll.stop()
             state["stamp"] = now
 
     try:
@@ -364,7 +403,8 @@ def main():
     client.loop_start()
 
     click = "" if args.no_click else "，point + 捏合 = 按住左鍵（點擊 / 拖曳）"
-    print(f"手勢對應: {CURSOR_GESTURE} = 游標跟著食指尖{click}，{SCROLL_GESTURE} = 搖桿捲動"
+    print(f"手勢對應: {CURSOR_GESTURE} = 游標 (跟著 {args.anchor}){click}，"
+          f"{SCROLL_GESTURE} = 捲動 (手指向上 / 向下)"
           f"{'  [dry-run，不會真的控制]' if args.dry_run else ''}")
     print(f"螢幕 {screen[0]}x{screen[1]}，鏡頭畫面中央 {args.region:.0%} 對應整個螢幕"
           f"{'，左右翻轉' if not args.no_mirror else ''}。Ctrl+C 結束。")
