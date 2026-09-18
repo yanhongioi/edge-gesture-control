@@ -196,6 +196,7 @@ git push
 | `python3 hand_cam.py` | 預設：NPU + 串流 :8080 |
 | `python3 hand_cam.py --mqtt 192.168.7.1` | 同時把手部、手勢、人物資料送到筆電 |
 | `python3 hand_cam.py --debug` | 畫出除錯用的框（被否決的偵測框、在人物附近找手的範圍） |
+| `python3 hand_cam.py --display` | 在板子的 HDMI 螢幕 / 投影機上全螢幕顯示（`--windowed` = 小視窗；按 `q` 結束）。投影機要在**板子開機前**就打開並切到這個 HDMI 輸入，見下方已知問題 |
 | `python3 hand_cam.py --image test_images/hand-1.jpg` | 單張圖片測試，結果存到 `output/` |
 | `python3 hand_cam.py --delegate cpu` | 改用 CPU 跑（跟 NPU 比較，demo 用） |
 | `python3 hand_cam.py --mirror` | 畫面左右翻轉 |
@@ -381,7 +382,7 @@ C270 640×480
 - [ ] 開機自動執行 `usb_net.sh`（Wi-Fi 會換網路，是否也要自動連線之後再決定）
 - [ ] VS Code Remote-SSH（主機填 `root@192.168.7.2`）
 - [x] `hand_cam.py` 開鏡頭走的是 GStreamer（2026-09-18 上板確認）
-- [ ] HDMI 顯示（`--display`）：第一次上板失敗（找不到 Weston 的 wayland socket），已改成到 `/run/user/*/` 都找、找不到就略過不當掉，**待再測**
+- [x] HDMI 顯示（`--display`）接投影機成功（2026-09-18）：投影機要在開機前就開好；預設全螢幕，**全螢幕後的 FPS 待確認**
 - [ ] 改用充電器供電
 
 **手部與人物辨識**（都已上板驗證，細節見下方調校紀錄）
@@ -460,6 +461,10 @@ C270 640×480
 - **`g_ether` 在 Windows 上被認成「USB 序列裝置 (COMx)」**，也無法手動改成網卡驅動 → 改用 `usb_net.sh`（NCM）。
 - **C 對 C 線接 `USB1_C` 時辨識不到** → 改用 A 對 C 線接筆電的 USB-A。
 - **Wi-Fi 卡在 SCANNING，找不到熱點**：舊版 `bringup.sh` 在同一張網卡上啟動了第二個 `wpa_supplicant`。新版腳本已經不會重複啟動；遇到時請照「板子重開機後要重做的事」裡的四行重設。
+- **HDMI 投影機沒畫面、Weston 啟動失敗**（2026-09-18）：`weston.log` 顯示 `no available modes for HDMI-A-1`，也就是板子讀不到螢幕的解析度資訊（`/sys/class/drm/card0-HDMI-A-1/edid` 是 0 bytes）。原因是開機時投影機還沒開，而板子只在開機時讀一次。**先打開投影機、切到這個 HDMI 輸入，再開機（或 `reboot`）** 就正常了。
+  - `kmsro: driver missing` 只是警告（i.MX93 沒有 GPU），Weston 用的是 G2D 繪圖，不影響。
+  - 檢查：`wc -c /sys/class/drm/card0-HDMI-A-1/edid`（要是 128 或 256）、`systemctl status weston`（要是 active）。
+  - 如果某台螢幕怎樣都讀不到，備案是在 `/etc/xdg/weston/weston.ini` 的 `[output]` 手動指定解析度（例如 1280×720 的 modeline）。
 - **Android 熱點在沒有裝置連線時會自動關閉**，重新開啟後 BSSID 和頻道都會改變。建議在手機上關掉「自動關閉熱點」。
 - `dmesg` 裡的 `ethosu: can't change firmware ...`：每次啟動 NPU 程式都會出現，可以忽略。
 - **pip 安裝失敗：`Temporary failure in name resolution`**（ping 8.8.8.8 卻是通的）：DNS 的問題，見「系統與軟體」的 DNS 那一列。
