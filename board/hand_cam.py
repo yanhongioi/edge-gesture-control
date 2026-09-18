@@ -14,7 +14,7 @@
 #
 # 用法 (在板子上):
 #   python3 hand_cam.py                          # NPU + 串流到 :8080
-#   python3 hand_cam.py --display                # 另外顯示在板子 HDMI 螢幕
+#   python3 hand_cam.py --display                # 另外顯示在板子 HDMI 螢幕 / 投影機 (全螢幕；--windowed 小視窗)
 #   python3 hand_cam.py --stream-scale 0.5 --stream-fps 10   # 網路慢時減輕串流
 #   python3 hand_cam.py --delegate cpu           # 用 CPU 跑 (跟 NPU 對照)
 #   python3 hand_cam.py --mqtt 192.168.7.1       # 21 點座標送到 PC, topic: edge/hand
@@ -48,6 +48,7 @@ except ImportError:
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ETHOSU_DELEGATE = "/usr/lib/libethosu_delegate.so"
+WINDOW_NAME = "i.MX93 Hand Skeleton"     # --display 的視窗
 
 # MediaPipe 21 點手部骨架連線
 # 0 手腕 | 1-4 拇指 | 5-8 食指 | 9-12 中指 | 13-16 無名指 | 17-20 小指
@@ -626,7 +627,8 @@ def main():
     ap.add_argument("--stream-scale", type=float, default=1.0, help="串流畫面縮放，例如 0.5 = 320x240")
     ap.add_argument("--stream-quality", type=int, default=60, help="串流 JPEG 畫質 1~100")
     ap.add_argument("--stream-fps", type=float, default=15, help="串流最高幀率 (不影響推論)")
-    ap.add_argument("--display", action="store_true", help="在板子 HDMI 螢幕上顯示")
+    ap.add_argument("--display", action="store_true", help="在板子 HDMI 螢幕 / 投影機上顯示 (預設全螢幕)")
+    ap.add_argument("--windowed", action="store_true", help="搭配 --display：用原始大小的小視窗，不要全螢幕")
     ap.add_argument("--mqtt", default="", help="MQTT broker IP，例如 192.168.10.1")
     ap.add_argument("--mqtt-topic", default="edge/hand")
     ap.add_argument("--mqtt-hz", type=float, default=15)
@@ -684,6 +686,11 @@ def main():
     mqtt_pub = MqttPublisher(args.mqtt, args.mqtt_topic, args.mqtt_hz) if args.mqtt else None
     if args.display and not setup_wayland():
         args.display = False
+    if args.display:
+        # WINDOW_NORMAL 才能縮放；全螢幕時 640x480 的畫面會等比例放大填滿 (兩側可能有黑邊)
+        cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+        if not args.windowed:
+            cv2.setWindowProperty(WINDOW_NAME, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
     if not streamer and not args.display and not mqtt_pub:
         print("注意：沒開串流/顯示/MQTT，只會在終端機印 FPS")
 
@@ -732,7 +739,7 @@ def main():
                                   "width": frame.shape[1], "height": frame.shape[0],
                                   "hands": hands, "person": person_info})
             if args.display:
-                cv2.imshow("i.MX93 Hand Skeleton", frame)
+                cv2.imshow(WINDOW_NAME, frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
             if args.verbose or time.time() - last_print > 2:
