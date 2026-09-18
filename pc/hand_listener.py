@@ -24,7 +24,9 @@ def on_message(client, userdata, msg):
         return
     hand = data["hands"][0]
     # gesture = 連續數幀一致才確認的手勢；gesture_raw = 這一幀單獨判斷的結果 (board/gesture.py)
-    gtxt = f"gesture {hand.get('gesture') or '-':6s} (raw {hand.get('gesture_raw') or '-':6s})"
+    gtxt = f"gesture {hand.get('gesture') or '-':9s} (raw {hand.get('gesture_raw') or '-':9s})"
+    ratio = hand.get("pinch_ratio")
+    gtxt += f"  pinch {'YES' if hand.get('pinch') else 'no ':3s} ({ratio:.2f})" if ratio is not None else ""
     lm = hand["landmarks"]                        # 21 個 [x, y, z]，x/y 為 0~1
     text = "  ".join(f"{NAMES[i]}({lm[i][0]:.2f},{lm[i][1]:.2f})" for i in (0, 8))
     print(f"\rfps {data['fps']:5.1f}  {ptxt}  [{hand.get('source', '?'):6s}] {gtxt}  {text}   ", end="")

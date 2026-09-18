@@ -16,14 +16,14 @@
 edge-gesture-control/
 ├── board/                    # 跑在 FRDM-i.MX93 上（整個資料夾 scp 到板子）
 │   ├── hand_cam.py           # C270 → 手部偵測 + 21 點骨架 + 手勢 + 人物定位 → HTTP 串流 / HDMI / MQTT
-│   ├── gesture.py            # 從 21 點判斷手勢（open / point），附連續幀確認
+│   ├── gesture.py            # 從 21 點判斷手勢（10 種）和捏合，附連續幀確認（隊友的分支 gesture-classification）
 │   ├── bringup.sh            # 開機後一行設定好網路（USB 直連 + Wi-Fi）
 │   ├── usb_net.sh            # 把 USB1_C 設成 USB 網卡，讓筆電直連 (192.168.7.2)
 │   ├── models/               # 手部、人物模型（原始 + Vela 編譯版 + Vela 報告）
 │   └── test_images/          # 單張圖片測試用（張開手掌、握拳、指東西）
 ├── pc/                       # 跑在 Windows 筆電
 │   ├── hand_listener.py      # 接收板子送來的資料並顯示 (MQTT edge/hand)，除錯用
-│   ├── gesture_control.py    # 收到手勢就控制這台電腦（point = 移動游標，open = 按住左鍵）
+│   ├── gesture_control.py    # 收到手勢就控制這台電腦（point = 游標、捏合 = 點擊 / 拖曳、two = 捲動）
 │   ├── mosquitto.conf        # MQTT broker 設定（允許外部連線）
 │   └── requirements.txt
 ├── scripts/
@@ -46,6 +46,14 @@ edge-gesture-control/
 | E 介面、簡報 | `pc/ui/`、`docs/` |
 
 **文件規則**：新的說明優先寫進現有的三份文件，不要另外開新的 md。
+
+**分支規則**：`board/gesture.py`（手勢辨識）主要由隊友在 `gesture-classification` 分支開發。要改辨識邏輯時，先在那個分支上改、推上去，再合進 `main`，這樣兩邊的 `gesture.py` 一致，之後不容易衝突：
+```powershell
+git switch gesture-classification; git pull
+# 修改、commit
+git push
+git switch main; git merge gesture-classification
+```
 
 ## 指令區
 
@@ -100,43 +108,42 @@ python3 hand_cam.py --mqtt 192.168.7.1 --mqtt-hz 30
 
 ### 手勢控制（`pc/gesture_control.py`）
 
-游標模式的流程：
-
-```text
-待機 ──point──▶ 移動游標 ──open──▶ 按住左鍵（移動 = 拖曳） ──point──▶ 放開，回到移動游標
- ▲                 │                       │
- └── 手不見、其他手勢超過 0.3 秒、資料中斷、程式結束 ─┘（按住中一律放開）
-```
-
-| 手勢（確認過的 `gesture`） | 動作 |
+| 手勢 | 動作 |
 | --- | --- |
-| `point`（只伸食指） | 進入游標模式；游標跟著**食指尖**（第 8 點）移動 |
-| `open`（手掌張開），**在游標模式中** | 按住左鍵，繼續移動就是拖曳；換回 `point` 就放開。快速 `point → open → point` = 一次點擊 |
-| `open`，**在待機時** | 不動作。`open` 也是「起手式」，不能一舉手就點下去 |
+| `point`（手槍姿勢：食指指出去，**拇指立起來**） | 游標跟著食指尖（第 8 點）移動 |
+| `point` + **拇指壓下去碰食指側邊**（扣扳機 = 捏合） | 按住左鍵。快速捏一下 = 點擊；捏住不放再移動 = 拖曳；拇指立起來 = 放開 |
+| `two`（食指 + 中指） | 搖桿式捲動：比出 `two` 那一刻的手掌高度是起點，**手往上抬 = 往上捲，往下放 = 往下捲**，離起點越遠捲得越快，起點上下 4% 以內不動 |
+| `open` | 不動作（起手式：站遠時先張開手掌舉到臉旁邊，讓系統找到手） |
+| `fist` | **永遠不動作**（拿刀、拿鍋鏟時的手） |
+| 其他（`three`、`four`、`six`、`rock`、`ok`、`thumbs_up`） | 還沒對應，之後有需要再加 |
 
 ```powershell
 py -3.11 .\pc\gesture_control.py --region 0.3         # 手移動更小的範圍就能走遍整個螢幕（預設 0.4）
 py -3.11 .\pc\gesture_control.py --center-y 0.4       # 對應範圍往上移（手習慣舉高一點時）
-py -3.11 .\pc\gesture_control.py --min-cutoff 0.5     # 游標更穩但更黏（預設 1.0）
-py -3.11 .\pc\gesture_control.py --beta 0.01          # 快速移動時更跟手（預設 0.005）
+py -3.11 .\pc\gesture_control.py --deadband 10        # 手想停住時游標更不會動（預設 6 px）
+py -3.11 .\pc\gesture_control.py --min-cutoff 0.3     # 游標更穩但更黏（預設 0.5）
+py -3.11 .\pc\gesture_control.py --beta 0.1           # 快速移動時更跟手（預設 0.05）
+py -3.11 .\pc\gesture_control.py --press-settle 0.3   # 捏下後停久一點，點擊比較不會變成拖曳（預設 0.2 秒）
+py -3.11 .\pc\gesture_control.py --no-click           # 關掉捏合點擊，只移動游標
+py -3.11 .\pc\gesture_control.py --scroll-gain 20000  # 捲快一點（預設 12000）；--scroll-invert 上下反過來
 py -3.11 .\pc\gesture_control.py --no-mirror          # 板子有加 --mirror 時要加
-py -3.11 .\pc\gesture_control.py --press-settle 0.4   # 按下後游標停久一點才開始拖（點擊比較不會拖到，預設 0.25 秒）
-py -3.11 .\pc\gesture_control.py --no-click           # 關掉 open = 按住，只移動游標
 py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
 ```
 
-游標模式的設計（對應 `plan.md` 技術細節 2～4）：
-- **對應方式**：絕對對應，只取鏡頭畫面**中央 40%** 的範圍對應到整個主螢幕，超出範圍時游標會停在螢幕邊緣。預設左右翻轉，因為鏡頭是面對人拍的。
-- **防抖動**：用 One Euro 濾波。模擬測試中，靜止時 ±14 px 的抖動降到 ±6 px；以 1000 px/s 移動時延遲約 18 px。
-- **換手勢時游標凍結**（`plan.md` 第 4 點）：從 `point` 換成 `open`，或反過來時，其他手指在動，指尖位置不準。所以一開始換手勢，游標就退回約 3 筆資料之前的位置並停住，**按下和放開都發生在這個位置**。
-  - 按下後再停 `--press-settle`（0.25 秒）才開始拖曳，所以快速換回 `point` 就是乾淨的點擊。
-  - 換手勢的中間幾幀判斷不出手勢是正常的，最多容許 `--grace`（0.3 秒）。
-- **左鍵不會卡住**：手不見、換成其他手勢、資料中斷、按 Ctrl+C，都會先放開左鍵。
-- **延遲**：手勢要連續 4 幀才確認，按下和放開大約晚 0.13 秒。
-- **顯示縮放**：程式會設定成使用實際像素座標，125% 或 150% 縮放時位置也對得準。只控制主螢幕。
-- **還沒做**：右鍵、雙擊的專用手勢；裝上雲台後，改用「手相對於人物框」的位置。
-- 比 `point` 時，實體滑鼠會被覆蓋；手勢放開就會交還。
-- 捲動函式 `scroll_down` / `scroll_up` 還留在程式裡，之後有新手勢時，加進 `CONTINUOUS` 表即可使用。
+設計重點：
+- **為什麼用捏合點擊**：舊的做法要「張開整隻手再收回」，手的形狀大改兩次，指尖一定會偏，很難點準。捏合只動拇指，食指不動，所以點得準；`point` 的分類本來就不看拇指，捏合時手勢仍然是 `point`，游標不會中斷。
+- **捏合判斷在板子上**：`board/gesture.py` 的 `PinchDetector` 看拇指指尖到食指第一節的距離相對於手掌大小的比例（`pinch_ratio`），小於 0.25 連續 2 幀算捏下，大於 0.35 連續 2 幀算放開。**這兩個門檻是初始值，要用真實鏡頭校準**：`pc/hand_listener.py` 會即時顯示比例，比出「拇指立起來」和「拇指壓下」各看一下數字，再調整 `gesture.py` 裡的 `PINCH_ON_RATIO` / `PINCH_OFF_RATIO`。
+- **防誤點**：
+  - 一進游標模式就已經捏著（拇指自然貼著手指）不算，要先看到拇指立起來一次，捏合才有效。
+  - 待機時捏合不動作。
+- **按下和放開的位置**：用捏合前約 2 筆資料的位置（拇指一動，食指也會跟著抖）。捏下後游標停 0.2 秒，這段時間內放開就是原地點擊。
+- **游標不再閃爍**：
+  - 舊版只要某一幀手勢判斷閃一下，游標就會退回再跳回來，現在只看確認過的手勢。
+  - 濾波參數重新挑過，另外加了 6 px 的不動區。
+  - 模擬測試（骨架點抖動約 ±11 px）：靜止時每秒閃動從約 21 次降到約 4 次；快速移動（1500 px/s）的落後從約 21 px 降到約 3 px。實際效果要上板確認。
+- **左鍵不會卡住**：手不見、換成其他手勢超過 0.3 秒、資料中斷、按 Ctrl+C，都會先放開。
+- **對應方式**：鏡頭畫面**中央 40%** 對應整個主螢幕，預設左右翻轉；程式會使用實際像素座標，Windows 縮放 125% / 150% 時也對得準。
+- **還沒做**：右鍵；裝上雲台後改用「手相對於人物框」的位置。
 
 ### 用另一台電腦接收 / 被控制
 
@@ -374,13 +381,15 @@ C270 640×480
 - [x] 手部追蹤：找到手之後只跑骨架模型，追蹤中的門檻是 0.55
 - [x] 沒追到手時，偵測也會看人物附近，遠距離比較容易找到手
 - [x] `--debug` 才畫除錯用的框；Ctrl+C 可以正常結束
+- [x] 手勢擴充到 10 種（隊友，分支 `gesture-classification`）：`fist`、`thumbs_up`、`two`、`three`、`four`、`six`、`rock`、`ok`，拇指用實際鏡頭畫面校準；部分判斷還不太穩
+- [x] 捏合偵測 `PinchDetector`（加在隊友的分支上，再合進 `main`）：拇指壓下碰食指 = 捏下，門檻**待鏡頭校準**
 - [x] 手勢分類 `board/gesture.py`（隊友，PR #1）：用手指關節夾角判斷每根手指伸直或彎曲，歸類成 `open`（手掌張開）、`point`（只伸食指）；同一個手勢連續 4 幀才確認，確認次數會跟著追蹤延續
 
 **主線（下一步）**：MQTT 打通 → 手勢分類 → PC 控制 → 防誤觸 / 回饋音
 
 - [x] 在板子上安裝 `paho-mqtt`
 - [x] 筆電安裝 Mosquitto，打通 MQTT（板子 → 筆電），`pc/hand_listener.py` 收得到手部、手勢、人物資料
-- [x] PC 控制：`pc/gesture_control.py`，`point` → 游標跟著食指尖（One Euro 濾波、中央 40% 對應整個螢幕）；游標模式中 `open` → 按住左鍵，可以點擊或拖曳（換手勢時凍結游標，任何結束情況都會放開左鍵）。PC 上用單元測試（7 種情境）和模擬訊息測過，**待實機驗證**
+- [x] PC 控制：`pc/gesture_control.py` 改版：`point` 移動游標（重新挑過濾波參數、加不動區、不再因為判斷閃一下就跳動）、`point` + 捏合 = 點擊 / 拖曳、`two` = 搖桿捲動。PC 上用 14 種單元測試情境和模擬訊息測過，**待實機驗證**
 - [ ] 上板驗證手勢：先張開手掌讓系統找到手，追蹤中再改比 `point`，看能不能正確判斷
 - [ ] 更多手勢（握拳、左右滑等）；「起手式」＝張開手掌舉到臉旁邊
 - [ ] 更多 PC 控制（捲動、快捷鍵、暫停 / 播放），對應到新手勢
@@ -453,10 +462,11 @@ C270 640×480
 | --- | --- | --- |
 | `edge/hand` | 板子 → PC | `{"ts", "fps", "width", "height", "hands": [...], "person": {...} 或 null}` |
 
-- `hands[]`：`{"source", "score", "presence", "gesture", "gesture_raw", "box": [x0, y0, x1, y1], "landmarks": [[x, y, z] × 21]}`
+- `hands[]`：`{"source", "score", "presence", "gesture", "gesture_raw", "pinch", "pinch_ratio", "box": [x0, y0, x1, y1], "landmarks": [[x, y, z] × 21]}`
   - `source`：`"detect"`（這一幀由手部偵測找到）或 `"track"`（沿用上一幀追蹤）。
-  - `gesture`：確認過的手勢（`"open"`、`"point"` 或 `null`），同一個手勢要連續 4 幀才會出現，之後做觸發請用這個。
+  - `gesture`：確認過的手勢（`"open"`、`"point"`、`"fist"`、`"thumbs_up"`、`"two"`、`"three"`、`"four"`、`"six"`、`"rock"`、`"ok"` 或 `null`），同一個手勢要連續 4 幀才會出現，之後做觸發請用這個。
   - `gesture_raw`：這一幀單獨判斷的結果，還沒經過連續幀確認，會跳動，主要給除錯和單張圖片測試用。
+  - `pinch`：拇指有沒有壓在食指側邊（扣扳機），已經過遲滯和連續 2 幀處理；`pinch_ratio`：原始比例，校準門檻用。
 - `person`：`{"score", "box", "center": [x, y], "dx", "dy", "age"}`
   - `dx`、`dy`：人物中心偏離畫面中央的量，範圍 -1～+1，正值代表人在右方或下方。
   - `age`：距離上次偵測到這個人過了幾幀。
