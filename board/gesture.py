@@ -14,24 +14,37 @@ MIDDLE = (9, 10, 11, 12)
 RING = (13, 14, 15, 16)
 PINKY = (17, 18, 19, 20)
 
-# 每根手指用來判斷「伸直/彎曲」的三個點 (第一個關節, 中間關節, 指尖)
-# 中指/無名指/小指/食指用 MCP-PIP-TIP 的夾角；拇指用 MCP-IP-TIP (拇指沒有 PIP)
+# 每根手指 (拇指除外) 用來判斷「伸直/彎曲」的三個點 (第一個關節, 中間關節, 指尖)：MCP-PIP-TIP 的夾角
 FINGER_JOINTS = {
-    "thumb": (THUMB[1], THUMB[2], THUMB[3]),
     "index": (INDEX[0], INDEX[1], INDEX[3]),
     "middle": (MIDDLE[0], MIDDLE[1], MIDDLE[3]),
     "ring": (RING[0], RING[1], RING[3]),
     "pinky": (PINKY[0], PINKY[1], PINKY[3]),
 }
 
-# 伸直時關節夾角接近 180 度，彎曲時明顯變小；拇指的活動方式不同，門檻放寬一點
+# 伸直時關節夾角接近 180 度，彎曲時明顯變小
 EXTENDED_ANGLE_DEG = {
-    "thumb": 140.0,
     "index": 155.0,
     "middle": 155.0,
     "ring": 155.0,
     "pinky": 155.0,
 }
+
+WRIST = 0
+THUMB_TIP = THUMB[3]
+INDEX_PIP = INDEX[1]
+MIDDLE_MCP = MIDDLE[0]
+
+# 拇指指尖到食指第一指節 (PIP) 的距離，相對手掌大小 (手腕到中指根部) 的比例。
+# 用兩次真實握拳 + 兩張真實張開手掌校準：握拳量到 0.17/0.28，張開量到 0.41/0.90，
+# 門檻設在兩群數字的中間 (0.35) 兩邊都有餘裕。這是給 fist/thumbs_up 用的：握拳時拇指
+# 是往指節「內收」過去貼著彎起來的手指，跟手腕的距離拉不開。
+THUMB_EXTENDED_RATIO = 0.35
+
+# 手掌底部多邊形：手腕 + 四指根部 (MCP)，用在 four/open：比「四」時拇指通常還是打直的，
+# 只是收攏貼著手掌 (跟握拳時拇指往指節壓過去的動作不同)，指尖會落在這個範圍裡面；
+# 伸直張開時指尖會伸出這個範圍外。
+PALM_MCP_POLYGON = (WRIST, INDEX[0], MIDDLE[0], RING[0], PINKY[0])
 
 
 def _angle_deg(a, b, c):
@@ -44,6 +57,31 @@ def _angle_deg(a, b, c):
     return math.degrees(math.acos(cos))
 
 
+def _dist(a, b):
+    return float(np.linalg.norm(np.asarray(a) - np.asarray(b)))
+
+
+def _point_in_polygon(pt, poly):
+    """Ray casting：pt 是否落在 poly (頂點座標 list) 圍成的範圍內。"""
+    x, y = pt
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x1, y1 = poly[i]
+        x2, y2 = poly[(i + 1) % n]
+        if (y1 > y) != (y2 > y):
+            x_at_y = x1 + (y - y1) * (x2 - x1) / (y2 - y1)
+            if x < x_at_y:
+                inside = not inside
+    return inside
+
+
+def _thumb_across_palm(pts):
+    """拇指指尖是否貼在手掌範圍內 (打直但收攏，用在 four vs open)。"""
+    poly = [pts[i] for i in PALM_MCP_POLYGON]
+    return _point_in_polygon(pts[THUMB_TIP], poly)
+
+
 def finger_states(pts):
     """pts: (21, 2) 陣列。回傳 {"thumb": bool, "index": bool, ...} 每根手指是否伸直。"""
     pts = np.asarray(pts, dtype=np.float32)
@@ -51,18 +89,61 @@ def finger_states(pts):
     for name, (i0, i1, i2) in FINGER_JOINTS.items():
         angle = _angle_deg(pts[i0], pts[i1], pts[i2])
         states[name] = angle >= EXTENDED_ANGLE_DEG[name]
+    # 拇指不用角度：握拳/內收時拇指自己的關節幾乎不會像其他手指一樣彎折，
+    # 角度判斷幾乎永遠讀成「伸直」。改用距離：指尖離食指第一指節夠遠才算伸直；
+    # 握拳/內收時指尖會貼在食指第一指節附近。
+    palm_size = _dist(pts[WRIST], pts[MIDDLE_MCP])
+    thumb_reach = _dist(pts[THUMB_TIP], pts[INDEX_PIP])
+    states["thumb"] = palm_size > 1e-6 and (thumb_reach / palm_size) >= THUMB_EXTENDED_RATIO
     return states
 
 
+# 食指/中指/無名指/小指這 4 指的組合就能唯一決定手勢，拇指不用管：
+# 比 two/three 這種手勢時，拇指常常自然往外撐開 (不是刻意收攏)，量出來的伸直/彎曲很不穩定，
+# 但只要看這 4 指，point/two/three/six/rock/ok 各自的組合本來就不會互相撞名。
+FOUR_FINGER_TABLE = {
+    frozenset({"index"}): "point",
+    frozenset({"index", "middle"}): "two",
+    frozenset({"index", "middle", "ring"}): "three",
+    frozenset({"pinky"}): "six",
+    frozenset({"index", "pinky"}): "rock",
+    frozenset({"middle", "ring", "pinky"}): "ok",
+}
+FOUR_FINGER_ALL = frozenset({"index", "middle", "ring", "pinky"})
+FOUR_FINGERS = ("index", "middle", "ring", "pinky")
+
+
 def classify_landmarks(pts):
-    """回傳 "open"、"point" 或 None (無法歸類的手勢/姿勢)。"""
+    """回傳手勢名稱，或 None (沒有定義成任何手勢的手指組合)。
+    拇指只在「4 指全彎 (fist/thumbs_up)」和「4 指全伸直 (four/open)」這兩種情況才用來判斷，
+    其他手勢只看 4 指的組合，不管拇指 (原因見上面的註解)。
+    fist/thumbs_up 用距離比例 (握拳時拇指往指節壓)；four/open 用手掌多邊形 (比四時拇指打直但收攏，
+    是不同的動作，不能用同一套判斷)。"""
+    pts = np.asarray(pts, dtype=np.float32)
     states = finger_states(pts)
-    four = (states["index"], states["middle"], states["ring"], states["pinky"])
-    if all(four) and states["thumb"]:
-        return "open"
-    if states["index"] and not states["middle"] and not states["ring"] and not states["pinky"]:
-        return "point"
-    return None
+    four_finger = frozenset(name for name in FOUR_FINGERS if states[name])
+    if not four_finger:
+        return "thumbs_up" if states["thumb"] else "fist"
+    if four_finger == FOUR_FINGER_ALL:
+        return "four" if _thumb_across_palm(pts) else "open"
+    return FOUR_FINGER_TABLE.get(four_finger)
+
+
+def debug_features(pts):
+    """除錯用：每根手指的判斷細節，加上完整 21 點座標。--debug 時印出來，用真實數字對規則，不要猜。"""
+    pts = np.asarray(pts, dtype=np.float32)
+    angles = {name: round(_angle_deg(pts[i0], pts[i1], pts[i2]), 1)
+              for name, (i0, i1, i2) in FINGER_JOINTS.items()}
+    palm_size = _dist(pts[WRIST], pts[MIDDLE_MCP])
+    thumb_reach = _dist(pts[THUMB_TIP], pts[INDEX_PIP])
+    return {
+        "angles": angles,
+        "thumb_tip": [round(float(v), 1) for v in pts[THUMB_TIP]],
+        "thumb_reach_ratio": round(thumb_reach / palm_size, 3) if palm_size > 1e-6 else None,
+        "thumb_across_palm": _thumb_across_palm(pts),
+        "states": finger_states(pts),
+        "landmarks": [[round(float(x), 1), round(float(y), 1)] for x, y in pts],
+    }
 
 
 class GestureSmoother:
