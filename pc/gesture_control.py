@@ -4,6 +4,8 @@
 #   point         游標跟著食指尖 (第 8 點) 移動
 #   point + 捏合   按住左鍵 (手槍姿勢：拇指立起來 = 瞄準，拇指壓下去碰食指 = 扣扳機)
 #                 快速捏一下 = 點擊；捏住不放再移動 = 拖曳；拇指放開 = 放開左鍵
+#                 預先鎖定：拇指一開始靠近食指 (pinch_ratio < --prefreeze)，游標就先鎖住，
+#                 點擊發生在鎖住的位置 (拇指壓下時食指會被帶著晃，這樣晃了也不影響)
 #   two           搖桿式捲動：比出 two 時記下手的高度，手往上抬 = 往上捲、往下放 = 往下捲，
 #                 離起點越遠捲越快，起點附近不動
 #   open / fist / 其他  不動作 (open 是起手式；fist 是拿刀具時的手，永遠不能觸發)
@@ -33,6 +35,7 @@ import paho.mqtt.client as mqtt
 
 TOPIC = "edge/hand"
 INDEX_TIP = 8                  # MediaPipe 21 點：8 = 食指尖
+ANCHORS = {"tip": 8, "pip": 6, "mcp": 5}    # 游標跟哪個點：食指尖 / 食指第一節關節 / 食指根部
 PALM = (0, 5, 9, 13, 17)       # 手腕 + 四指根部，平均起來當作手掌中心
 CURSOR_GESTURE = "point"
 SCROLL_GESTURE = "two"
@@ -139,6 +142,8 @@ class CursorController:
         self.hold_until = 0.0       # 這個時間之前游標不動 (捏下 / 放開後的短暫停頓)
         self.other_since = None     # 開始出現「不是 point」的時間
         self.armed = False          # 進入游標模式後，要先看到拇指立起來 (沒捏) 一次，捏合才有效
+        self.lock_pos = None        # 預先鎖定的位置 (拇指正在靠近食指)
+        self.lock_since = 0.0
         self.moves = 0
         self.last_print = 0.0
 
@@ -189,7 +194,7 @@ class CursorController:
             if g != CURSOR_GESTURE:
                 return
             self.state, self.moves, self.pos, self.other_since = "move", 0, None, None
-            self.armed = False
+            self.armed, self.lock_pos = False, None
             self.fx.reset(); self.fy.reset(); self.history.clear()
             print(f"  ▶ 游標模式開始（{CURSOR_GESTURE}）")
 
@@ -201,16 +206,33 @@ class CursorController:
             return
         self.other_since = None
 
-        # 捏合：按下 / 放開 (位置用幾筆之前的，然後短暫停住)
+        # 捏合：按下 / 放開 (位置用鎖定的或幾筆之前的，然後短暫停住)
         pinched = bool(hand.get("pinch")) and not a.no_click
+        ratio = hand.get("pinch_ratio")
         if not pinched:
             self.armed = True       # 一開始就捏著 (拇指自然貼著) 不算，避免一進游標模式就點下去
+
+        # 預先鎖定：拇指正在靠近食指 → 游標先鎖住 (拇指壓下時會把食指帶著晃)
+        if self.state == "move" and self.armed and not a.no_click and ratio is not None:
+            if self.lock_pos is None and not pinched and ratio < a.prefreeze and t >= self.hold_until:
+                self.lock_pos, self.lock_since = self._back_pos(), t
+                if self.lock_pos:
+                    self._set(*self.lock_pos, t)
+                if a.dry_run:
+                    print(f"  🔒 預先鎖定 (pinch_ratio {ratio:.2f})")
+            elif self.lock_pos is not None and not pinched and (
+                    ratio > a.prefreeze + 0.05 or t - self.lock_since > a.lock_timeout):
+                self.lock_pos = None                    # 拇指抬回去 (或鎖太久)：解鎖，從目前位置接續
+                self._restart_filter(t)
+                if a.dry_run:
+                    print(f"  🔓 解鎖 (pinch_ratio {ratio:.2f})")
+
         if pinched and self.state == "move" and self.armed:
-            back = self._back_pos()
-            if back:
-                self._set(*back, t)
+            target = self.lock_pos or self._back_pos()
+            if target:
+                self._set(*target, t)
             self._button(True)
-            self.state, self.hold_until = "press", t + a.press_settle
+            self.state, self.hold_until, self.lock_pos = "press", t + a.press_settle, None
             return
         if not pinched and self.state == "press":
             if t >= self.hold_until:                      # 拖曳中放開：也退回幾筆之前
@@ -220,11 +242,11 @@ class CursorController:
             self._button(False)                           # 還在停頓中放開 = 原地點擊
             self.state, self.hold_until = "move", t + a.release_settle
             return
-        if t < self.hold_until:
+        if t < self.hold_until or self.lock_pos is not None:
             return
 
-        # 跟著食指尖移動 (One Euro 濾波 + 不動區)
-        tip = hand["landmarks"][INDEX_TIP]
+        # 跟著食指 (預設指尖) 移動 (One Euro 濾波 + 不動區)
+        tip = hand["landmarks"][ANCHORS[a.anchor]]
         x, y = map_to_screen(tip[0], tip[1], self.sw, self.sh, a.region, (a.center_x, a.center_y),
                              not a.no_mirror)
         if self.hold_until:                               # 剛從停頓恢復
@@ -283,7 +305,13 @@ def main():
                    help="移動小於幾個像素就不動 (手想停住時游標不會閃)")
     g.add_argument("--grace", type=float, default=0.3, help="手勢短暫變成別的，容許幾秒才結束游標模式")
     g = ap.add_argument_group("點擊 (捏合)")
+    g.add_argument("--anchor", choices=list(ANCHORS), default="tip",
+                   help="游標跟哪個點：tip 食指尖 (預設)、pip 食指第一節關節、mcp 食指根部 (越往根部越穩)")
     g.add_argument("--no-click", action="store_true", help="關閉捏合 = 按住左鍵，只移動游標")
+    g.add_argument("--prefreeze", type=float, default=0.40,
+                   help="pinch_ratio 低於這個值 (拇指正在靠近食指) 就先鎖住游標；0 = 關閉")
+    g.add_argument("--lock-timeout", type=float, default=1.0,
+                   help="預先鎖定最多幾秒沒捏下就自動解鎖 (避免拇指放鬆時一直鎖著)")
     g.add_argument("--press-settle", type=float, default=0.2,
                    help="捏下後游標先停住幾秒 (這段時間內放開 = 原地點擊)")
     g.add_argument("--release-settle", type=float, default=0.1, help="放開後游標停住幾秒")
