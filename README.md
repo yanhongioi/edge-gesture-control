@@ -19,13 +19,16 @@ edge-gesture-control/
 │   ├── gesture.py            # 從 21 點判斷手勢（10 種）和捏合，附連續幀確認（隊友的分支 gesture-classification）
 │   ├── bringup.sh            # 開機後一行設定好網路（USB 直連 + Wi-Fi）
 │   ├── servo.py              # MG996R 伺服馬達（雲台）：pin 33 硬體 PWM，用角度控制
-│   ├── voice/                # 語音：NXP AFE + VIT 喚醒詞 / 指令（C270 麥克風），結果送 MQTT edge/voice
+│   ├── voice/                # 語音喚醒：NXP AFE + VIT「Hey NXP」（C270 麥克風），結果送 MQTT edge/voice
+│   ├── audio_stream.py       # 麥克風聲音用 TCP 8765 一直送到 PC（給 pc/voice_app.py）
 │   ├── usb_net.sh            # 把 USB1_C 設成 USB 網卡，讓筆電直連 (192.168.7.2)
 │   ├── models/               # 手部、人物模型（原始 + Vela 編譯版 + Vela 報告）
 │   └── test_images/          # 單張圖片測試用（張開手掌、握拳、指東西）
 ├── pc/                       # 跑在 Windows 筆電
 │   ├── hand_listener.py      # 接收板子送來的資料並顯示 (MQTT edge/hand)，除錯用
 │   ├── gesture_control.py    # 收到手勢就控制這台電腦（point = 游標、捏合 = 點擊 / 拖曳、two = 捲動）
+│   ├── voice_app.py          # 語音助理：板子聲音 → VAD 切句 → Whisper → 本地 LLM → Spotify / YouTube / 瀏覽器
+│   ├── audio/ llm/ control/ speech/   # voice_app 用到的模組（--mqtt-wake：板子 VIT 喚醒後才跑 Whisper）
 │   ├── mosquitto.conf        # MQTT broker 設定（允許外部連線）
 │   └── requirements.txt
 ├── scripts/
@@ -158,6 +161,28 @@ py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
 - **對應方式**：鏡頭畫面**中央 40%** 對應整個主螢幕；程式會使用實際像素座標，Windows 縮放 125% / 150% 時也對得準。
 - **左右翻轉**：板子預設就會翻轉畫面（像照鏡子），並在 MQTT 送出 `mirror` 欄位，PC 端看到就不會再翻第二次，不用自己加 `--no-mirror`。
 - **還沒做**：右鍵；裝上雲台後改用「手相對於人物框」的位置。
+
+### 語音助理（板子 VIT 喚醒 → PC Whisper + 本地 LLM）
+
+說「Hey NXP」→ 板子的 VIT 偵測到 → MQTT `edge/voice` 通知 PC → PC 把**下一句**送進 Whisper → LLM → 執行。
+沒喚醒時 PC 只做 VAD 切句，不跑 Whisper。C270 麥克風由 AFE（喚醒詞）和 `audio_stream.py`（聲音送 PC）共用（`asound.conf` 的 `c270`）。
+
+板子 SSH #1（先開這個，它會裝好 `/etc/asound.conf`；`MQTT_HOST` = 跑 broker 的電腦）：
+```bash
+MQTT_HOST=192.168.7.1 sh /root/edge-gesture-control/board/voice/run_voice.sh
+```
+板子 SSH #2：
+```bash
+python3 /root/edge-gesture-control/board/audio_stream.py --device c270
+```
+PC（repo 資料夾，broker 要開著；需要 NVIDIA 顯卡跑 Whisper，沒有的話加 `--asr-device cpu --compute-type int8`）：
+```powershell
+py -3.11 -m pc.voice_app --board-audio 192.168.7.2 --mqtt-wake 127.0.0.1              # 預覽：只印出 LLM 的計畫
+py -3.11 -m pc.voice_app --board-audio 192.168.7.2 --mqtt-wake 127.0.0.1 --execute    # 真的執行
+```
+- 說法：「Hey NXP，播放周杰倫的晴天」一口氣講完，或「Hey NXP」停一下再講指令（8 秒內）。講完停 0.7 秒 = 這句結束。
+- 不加 `--mqtt-wake` = 原本的做法：每句都跑 Whisper，句首要是「NXP」。
+- 停止：板子 `sh /root/edge-gesture-control/board/voice/run_voice.sh stop`；`audio_stream.py` 按 Ctrl+C。
 
 ### 用另一台電腦接收 / 被控制
 
@@ -424,6 +449,10 @@ C270 640×480
 - [x] 伺服馬達 MG996R 可以用硬體 PWM 控制（pin 33 = `pwmchip1` channel 2），`board/servo.py`
 - [ ] 語音：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），**待上板測試**
 - [x] 雲台持續追人：`hand_cam.py --servo`（`PersonPanner` + `servo.Panner`），**待上板測試**。設計（2026-09-17 決定）：
+- [x] 語音喚醒詞：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），2026-09-19 上板實測：喚醒詞 10/10；經 MQTT `edge/voice` 送到筆電也測通（NEXT、PAUSE 都有對上編號，說不清楚的指令 = UNKNOWN）
+- [x] C270 麥克風共用：`asound.conf` 的 `c270`（dsnoop），AFE 和 `audio_stream.py --device c270` 可以同時跑（2026-09-19 上板實測）
+- [ ] 語音：VIT 喚醒 → MQTT `edge/voice` → `pc/voice_app.py --mqtt-wake` 只把下一句送 Whisper + 本地 LLM。流程已用模擬測過（真 MQTT + 假 Whisper / LLM），**待在有 NVIDIA 顯卡的電腦上實測**
+- [ ] 雲台持續追人（人物定位、馬達控制都有了，剩下把 `dx` 接到馬達：把 `dx` 拉回 0）。設計（2026-09-17 決定）：
   - **人物偵測**：`detect_ssdmobilenetv3_quant`（來自 MobileNetSSD_VehicleHumanDetector）。正面、側面、背面都偵測得到，用人物框中心的 x 算雲台要轉的角度，讓人保持在畫面中央。
   - **手勢**：在這個穩定的畫面裡持續跑，不是兩種模式輪流切換。三個模型輪流使用 NPU，各自的 SRAM 都在 384 KB 以內，不會衝突。
   - **游標座標**：改用「手相對於人物框」的位置，不受鏡頭轉動影響。
@@ -497,6 +526,7 @@ C270 640×480
 | topic | 方向 | 內容 |
 | --- | --- | --- |
 | `edge/hand` | 板子 → PC | `{"ts", "fps", "width", "height", "hands": [...], "person": {...} 或 null}` |
+| `edge/voice` | 板子 → PC | 喚醒：`{"type": "wakeword", "id", "wakeword", "ts"}`；喚醒後的指令：`{"type": "command", "wakeword_id", "wakeword", "id", "command", "ts"}` |
 
 - `hands[]`：`{"source", "score", "presence", "gesture", "gesture_raw", "pinch", "pinch_ratio", "box": [x0, y0, x1, y1], "landmarks": [[x, y, z] × 21]}`
   - `source`：`"detect"`（這一幀由手部偵測找到）或 `"track"`（沿用上一幀追蹤）。
@@ -507,6 +537,10 @@ C270 640×480
   - `dx`、`dy`：人物中心偏離畫面中央的量，範圍 -1～+1，正值代表人在右方或下方。
   - `age`：距離上次偵測到這個人過了幾幀。
 - 座標都是 0～1 的正規化值。
+- `edge/voice`（`board/voice/run_voice.sh` → `vit_notify.py`）：
+  - `wakeword`：`"HEY NXP"`（id 1）或 `"HEY TV"`（id 2）。
+  - `command`：喚醒後約 3 秒內說的指令，`"MUTE"`、`"NEXT"`、`"SKIP"`、`"PAIR DEVICE"`、`"PAUSE"`、`"STOP"`、`"POWER OFF"`、`"POWER ON"`、`"PLAY MUSIC"`、`"PLAY GAME"`、`"WATCH CARTOON"`、`"WATCH MOVIE"`（id 1～12）；沒聽懂 = `"UNKNOWN"`（id 0）。每次喚醒後一定會送一則 `command`。
+  - broker 位址用環境變數 `MQTT_HOST` 指定（預設 192.168.7.1），例如走熱點時 `MQTT_HOST=172.20.10.3 sh run_voice.sh`。
 
 ## 授權與來源
 
