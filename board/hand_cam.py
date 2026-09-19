@@ -21,9 +21,10 @@
 #   python3 hand_cam.py --stream-scale 0.5 --stream-fps 10   # 網路慢時減輕串流
 #   python3 hand_cam.py --delegate cpu           # 用 CPU 跑 (跟 NPU 對照)
 #   python3 hand_cam.py --mqtt 192.168.7.1       # 21 點座標送到 PC, topic: edge/hand
-#   python3 hand_cam.py --person-every 10        # 人物偵測每 10 幀跑一次 (0 = 關閉)
+#   python3 hand_cam.py --person-every 5         # 人物偵測更頻繁 (預設 10；0 = 關閉，但雲台會不能用)
 #   python3 hand_cam.py --servo                  # 雲台追人：把人的框維持在畫面中央
 #   python3 hand_cam.py --servo --servo-dir 1    # 轉錯邊時換方向 (方向看馬達怎麼裝)
+#   python3 hand_cam.py --servo --servo-speed 4  # 還是會左右晃的話再轉慢一點
 #   python3 hand_cam.py --servo --servo-off      # 雲台待命，比 ok 才開始追人
 #   python3 hand_cam.py --image test_images/hand-1.jpg  # 單張圖片測試，結果存到 output/
 # --------------------------------------------------------------------------------------
@@ -324,8 +325,10 @@ class PersonPanner:
     轉到偏移小於 hold 才停。兩個門檻是遲滯：只用一個門檻的話，停下來那一刻偏移剛好在門檻上，
     下一幀又會再轉，鏡頭會一直左右抖。
 
-    為什麼 hold 不能設太小、速度不能設太快：人物偵測每 --person-every 幀才跑一次 (預設 5，
-    約 6 Hz)，馬達轉的時候看到的 dx 是好幾十毫秒前的，轉太快會衝過頭再追回來，變成來回晃。
+    為什麼 hold 不能設太小、速度不能設太快：人物偵測每 --person-every 幀才跑一次 (預設 10，
+    30 fps 下約 3 Hz)，中間那 10 幀馬達是「盲轉」的 —— 看到的 dx 是 300 多毫秒前的。
+    盲轉一次的距離 (速度 x 更新間隔) 必須明顯小於 hold 對應的角度，不然馬達會直接跨過停止範圍，
+    下次更新才發現過頭了要回頭修，看起來就是左右來回晃。預設 8 度/秒 x 0.33 秒 = 一次約 2.7 度。
     人不見了 (或 box 太舊) 就地停住，不要亂轉去找。"""
 
     def __init__(self, panner, deadband=0.15, hold=0.05, dir_sign=-1, mirror=False,
@@ -678,7 +681,8 @@ def main():
     ap.add_argument("--model-landmark",
                     default=os.path.join(HERE, "models/hand_landmark_new_256x256_integer_quant.tflite"))
     ap.add_argument("--model-person", default=os.path.join(HERE, "models/detect_ssdmobilenetv3_quant.tflite"))
-    ap.add_argument("--person-every", type=int, default=5, help="人物偵測每幾幀跑一次，0 = 關閉")
+    ap.add_argument("--person-every", type=int, default=10,
+                    help="人物偵測每幾幀跑一次，0 = 關閉。調小會更即時，但 NPU 要分更多時間給它，手勢那邊的 FPS 會掉")
     ap.add_argument("--person-thresh", type=float, default=0.5, help="人物偵測分數門檻")
     ap.add_argument("--device", default="", help="例如 /dev/video2；不給就自動找 C270")
     ap.add_argument("--width", type=int, default=640)
@@ -709,12 +713,14 @@ def main():
     ap.add_argument("--mqtt-hz", type=float, default=15)
     g = ap.add_argument_group("雲台 (servo，把人維持在畫面中央)")
     g.add_argument("--servo", action="store_true", help="開啟雲台追人 (需要 servo.py 的硬體 PWM)")
-    g.add_argument("--servo-speed", type=float, default=25.0,
-                   help="轉速 (度/秒)。太快會追過頭再追回來，因為人物偵測每幾幀才更新一次")
-    g.add_argument("--servo-deadband", type=float, default=0.15,
+    g.add_argument("--servo-speed", type=float, default=8.0,
+                   help="轉速 (度/秒)。兩次人物偵測之間馬達是盲轉的，轉太快會直接衝過停止門檻，"
+                        "然後要回頭修正，看起來就是左右晃")
+    g.add_argument("--servo-deadband", type=float, default=0.22,
                    help="人偏離畫面中央超過這個量 (0~1) 才開始轉")
-    g.add_argument("--servo-hold", type=float, default=0.05,
-                   help="轉到偏移小於這個量才停 (要比 --servo-deadband 小，這是遲滯)")
+    g.add_argument("--servo-hold", type=float, default=0.12,
+                   help="轉到偏移小於這個量才停 (要比 --servo-deadband 小，這是遲滯)。"
+                        "要比「一次盲轉的距離」大，不然停不進這個範圍裡，會一直來回過頭")
     g.add_argument("--servo-dir", type=int, choices=(1, -1), default=-1,
                    help="轉動方向：馬達怎麼裝決定的。轉錯邊就換成另一個值 (1 / -1)")
     g.add_argument("--servo-toggle", default="ok",
@@ -789,7 +795,10 @@ def main():
                 args.servo_deadband, args.servo_hold, args.servo_dir, args.mirror,
                 args.servo_toggle, not args.servo_off)
             panner.toggle.cooldown = args.servo_toggle_cooldown
+            blind = args.servo_speed * args.person_every / max(1, args.fps)
             print(f"雲台啟動：{args.servo_speed:.0f} 度/秒，範圍 {args.servo_min:.0f}~{args.servo_max:.0f} 度，"
+                  f"人物偵測每 {args.person_every} 幀 (約 {args.person_every / max(1, args.fps) * 1000:.0f} ms) "
+                  f"更新一次 → 每次盲轉約 {blind:.1f} 度，"
                   f"死區 {args.servo_deadband:.2f} / 停止 {args.servo_hold:.2f}"
                   f"，方向 {args.servo_dir:+d}"
                   f"{f'；手勢 {args.servo_toggle} = 開 / 關' if args.servo_toggle else ''}"
