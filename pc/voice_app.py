@@ -18,6 +18,7 @@ from pc.control import ControlExecutor
 from pc.control.browser import BrowserControlError
 from pc.control.executor import ControlExecutionError
 from pc.control.youtube import YouTubeError
+from pc.control.timer import TimerError
 from pc.llm import AgentPlanner
 from pc.speech.windows_tts import WindowsSpeaker, WindowsTtsError
 
@@ -172,6 +173,8 @@ def main() -> int:
                     print(json.dumps(result.plan.to_dict(), ensure_ascii=False, indent=2))
                     if result.plan.error:
                         print(f"[攔截] {result.plan.error}")
+                    elif result.plan.intent == "clarify" and pipeline.awaiting_followup:
+                        print("[等待補充] 20 秒內可直接回答，不必重說喚醒詞。")
                     elif result.executions:
                         for execution in result.executions:
                             print(f"[完成] {execution.message}")
@@ -201,6 +204,7 @@ def main() -> int:
         BrowserControlError,
         ControlExecutionError,
         YouTubeError,
+        TimerError,
         WindowsTtsError,
     ) as exc:
         print(f"語音助理錯誤：{exc}", file=sys.stderr)
