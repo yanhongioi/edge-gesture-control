@@ -418,7 +418,7 @@ C270 640×480
 **之後再做**
 
 - [x] 伺服馬達 MG996R 可以用硬體 PWM 控制（pin 33 = `pwmchip1` channel 2），`board/servo.py`
-- [x] 語音喚醒詞：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），2026-09-19 上板實測：HEY NXP 5/5、NEXT 3 次都抓到（說不清楚的指令 = UNKNOWN）。和隊友的 `audio_stream.py`（`hw:1,0`）搶同一顆麥克風，不能同時跑
+- [x] 語音喚醒詞：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），2026-09-19 上板實測：喚醒詞 10/10；經 MQTT `edge/voice` 送到筆電也測通（NEXT、PAUSE 都有對上編號，說不清楚的指令 = UNKNOWN）。和隊友的 `audio_stream.py`（`hw:1,0`）搶同一顆麥克風，不能同時跑
 - [ ] 語音：VIT 喚醒 → MQTT `edge/voice` → PC 的 voice_app 開始聽下一句（Whisper + 本地 LLM）
 - [ ] 雲台持續追人（人物定位、馬達控制都有了，剩下把 `dx` 接到馬達：把 `dx` 拉回 0）。設計（2026-09-17 決定）：
   - **人物偵測**：`detect_ssdmobilenetv3_quant`（來自 MobileNetSSD_VehicleHumanDetector）。正面、側面、背面都偵測得到，用人物框中心的 x 算雲台要轉的角度，讓人保持在畫面中央。
@@ -488,6 +488,7 @@ C270 640×480
 | topic | 方向 | 內容 |
 | --- | --- | --- |
 | `edge/hand` | 板子 → PC | `{"ts", "fps", "width", "height", "hands": [...], "person": {...} 或 null}` |
+| `edge/voice` | 板子 → PC | 喚醒：`{"type": "wakeword", "id", "wakeword", "ts"}`；喚醒後的指令：`{"type": "command", "wakeword_id", "wakeword", "id", "command", "ts"}` |
 
 - `hands[]`：`{"source", "score", "presence", "gesture", "gesture_raw", "pinch", "pinch_ratio", "box": [x0, y0, x1, y1], "landmarks": [[x, y, z] × 21]}`
   - `source`：`"detect"`（這一幀由手部偵測找到）或 `"track"`（沿用上一幀追蹤）。
@@ -498,6 +499,10 @@ C270 640×480
   - `dx`、`dy`：人物中心偏離畫面中央的量，範圍 -1～+1，正值代表人在右方或下方。
   - `age`：距離上次偵測到這個人過了幾幀。
 - 座標都是 0～1 的正規化值。
+- `edge/voice`（`board/voice/run_voice.sh` → `vit_notify.py`）：
+  - `wakeword`：`"HEY NXP"`（id 1）或 `"HEY TV"`（id 2）。
+  - `command`：喚醒後約 3 秒內說的指令，`"MUTE"`、`"NEXT"`、`"SKIP"`、`"PAIR DEVICE"`、`"PAUSE"`、`"STOP"`、`"POWER OFF"`、`"POWER ON"`、`"PLAY MUSIC"`、`"PLAY GAME"`、`"WATCH CARTOON"`、`"WATCH MOVIE"`（id 1～12）；沒聽懂 = `"UNKNOWN"`（id 0）。每次喚醒後一定會送一則 `command`。
+  - broker 位址用環境變數 `MQTT_HOST` 指定（預設 192.168.7.1），例如走熱點時 `MQTT_HOST=172.20.10.3 sh run_voice.sh`。
 
 ## 授權與來源
 
