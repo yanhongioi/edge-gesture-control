@@ -93,10 +93,39 @@ class TokenTests(unittest.TestCase):
                 "landmarks": [[0.5, 0.5] for _ in range(21)]}
         cursor.update(hand, 1.0)
         cursor.update(hand, 1.1)
-        cursor.update({"gesture": "open"}, 1.2)
-        cursor.update({"gesture": "open"}, 1.6)
-        cursor.update(hand, 1.7)
-        self.assertEqual(sender.fired, ["double_left_ctrl", "double_left_ctrl"])
+        self.assertEqual(sender.fired, [])
+        cursor.poll(1.49)
+        self.assertEqual(sender.fired, [])
+        cursor.poll(1.5)
+        self.assertEqual(sender.fired, ["left_ctrl"])
+        cursor.poll(1.69)
+        self.assertEqual(sender.fired, ["left_ctrl"])
+        cursor.poll(1.71)
+        self.assertEqual(sender.fired, ["left_ctrl", "left_ctrl"])
+        cursor.update({"gesture": "open"}, 1.8)
+        cursor.update({"gesture": "open"}, 2.2)
+        cursor.update(hand, 2.3)
+        cursor.poll(2.81)
+        cursor.poll(3.02)
+        self.assertEqual(sender.fired, ["left_ctrl"] * 4)
+
+    def test_leaving_point_mode_cancels_pending_ctrl_taps(self) -> None:
+        args = argparse.Namespace(
+            min_cutoff=0.5, beta=0.05, d_cutoff=0.3, dry_run=True,
+            no_click=True, prefreeze=0.4, lock_timeout=1.0,
+            press_settle=0.2, release_settle=0.1, grace=0.3,
+            anchor="pip", no_mirror=False, region=0.4,
+            center_x=0.5, center_y=0.5, deadband=6.0,
+        )
+        sender = FakeSender()
+        cursor = CursorController(args, (1920, 1080), hotkey_sender=sender)
+        hand = {"gesture": "point", "pinch": False,
+                "landmarks": [[0.5, 0.5] for _ in range(21)]}
+        cursor.update(hand, 1.0)
+        cursor.update({"gesture": "open"}, 1.1)
+        cursor.update({"gesture": "open"}, 1.5)
+        cursor.poll(2.0)
+        self.assertEqual(sender.fired, [])
 
 
 class DispatcherTests(unittest.TestCase):

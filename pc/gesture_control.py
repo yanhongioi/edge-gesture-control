@@ -53,6 +53,8 @@ ANCHORS = {"tip": 8, "pip": 6, "mcp": 5}    # 游標跟哪個點：食指尖 / �
 PALM = (0, 5, 9, 13, 17)       # 手腕 + 四指根部，平均起來當作手掌中心
 CURSOR_GESTURE = "point"
 SCROLL_GESTURE = "two"
+POINT_CTRL_DELAY = 0.5
+POINT_CTRL_INTERVAL = 0.2
 
 # 一次性快捷鍵 (見 GestureActionDispatcher)
 # 觸發條件是「手勢 + 捏合狀態」的組合，寫成 token：手勢名稱，捏著的話加上 "+pinch"。
@@ -179,6 +181,8 @@ class CursorController:
         self.moves = 0
         self.last_print = 0.0
         self.board_mirror = False   # 板子送來的座標是不是已經左右翻轉過 (見 on_message)
+        self.ctrl_taps_remaining = 0
+        self.next_ctrl_tap = None
 
     # ---- 輸出 --------------------------------------------------------------------------
     def _set(self, x, y, t):
@@ -206,6 +210,24 @@ class CursorController:
         if self.pos:
             self.fx(self.pos[0], t); self.fy(self.pos[1], t)
 
+    def poll(self, t):
+        """送出 point 模式開始後的延遲 Ctrl；由主迴圈輪詢，避免阻塞 MQTT。"""
+        if (self.state == "idle" or self.ctrl_taps_remaining <= 0
+                or self.next_ctrl_tap is None or t < self.next_ctrl_tap):
+            return
+        try:
+            self.hotkey_sender.fire("left_ctrl")
+            print(f"  ★ 左 Ctrl（第 {3 - self.ctrl_taps_remaining}/2 下）"
+                  + ("  [dry-run，沒有真的送出]" if self.args.dry_run else ""))
+        except hotkeys.HotkeyError as exc:
+            print(f"  ※ 左 Ctrl 失敗：{exc}")
+            self.ctrl_taps_remaining = 0
+            self.next_ctrl_tap = None
+            return
+        self.ctrl_taps_remaining -= 1
+        self.next_ctrl_tap = (t + POINT_CTRL_INTERVAL
+                              if self.ctrl_taps_remaining else None)
+
     # ---- 狀態 --------------------------------------------------------------------------
     def stop(self, reason=""):
         """結束游標模式；按住中一律放開"""
@@ -214,6 +236,8 @@ class CursorController:
         if self.state == "press":
             self._button(False)
         self.state = "idle"
+        self.ctrl_taps_remaining = 0
+        self.next_ctrl_tap = None
         print(f"  ■ 游標模式結束{reason}（更新 {self.moves} 次）")
 
     def update(self, hand, t):
@@ -230,12 +254,9 @@ class CursorController:
             self.armed, self.lock_pos = False, None
             self.fx.reset(); self.fy.reset(); self.history.clear()
             print(f"  ● 游標模式開始（{CURSOR_GESTURE}）")
-            try:
-                label = self.hotkey_sender.fire("double_left_ctrl")
-                print(f"  ★ {label}"
-                      + ("  [dry-run，沒有真的送出]" if a.dry_run else ""))
-            except hotkeys.HotkeyError as exc:
-                print(f"  ※ 連按兩下左 Ctrl 失敗：{exc}")
+            self.ctrl_taps_remaining = 2
+            self.next_ctrl_tap = t + POINT_CTRL_DELAY
+            print("  … 已排程 0.5 秒後連按兩下左 Ctrl（間隔 0.2 秒）")
 
         # 換成其他手勢：先停住，超過 grace 秒才結束 (中間的誤判不會打斷拖曳)
         if g != CURSOR_GESTURE:
@@ -637,6 +658,7 @@ def main():
                     if scroll.anchor is not None:
                         print("  ■ 停止捲動（沒有收到資料）")
                     scroll.stop()
+                cursor.poll(now)
                 rate = scroll.rate
             pending += rate * dt                          # 累積到整數才送 (滾輪只收整數)
             step = int(pending)
