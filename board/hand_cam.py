@@ -12,7 +12,7 @@
 #   * 找手時，一幀看全畫面、一幀只看人物上半身附近 (遠距離時手在偵測模型裡會變大)
 #   * 人物定位：每 N 幀跑一次人物偵測 (MobileNetSSD_VehicleHumanDetector)，標出人的中心點
 #     和偏離畫面中央的量 dx
-#   * 雲台追人 (--servo)：dx 偏離中央超過死區就用固定轉速轉馬達，把人拉回畫面中央
+#   * 雲台追人 (預設啟用)：dx 偏離中央超過死區就用固定轉速轉馬達，把人拉回畫面中央
 #     比一次 ok 手勢 = 開 / 關「跟著人轉」(--servo-toggle 可換手勢)
 #
 # 用法 (在板子上):
@@ -22,10 +22,11 @@
 #   python3 hand_cam.py --delegate cpu           # 用 CPU 跑 (跟 NPU 對照)
 #   python3 hand_cam.py --mqtt 192.168.7.1       # 21 點座標送到 PC, topic: edge/hand
 #   python3 hand_cam.py --person-every 5         # 人物偵測更頻繁 (預設 10；0 = 關閉，但雲台會不能用)
-#   python3 hand_cam.py --servo                  # 雲台追人：把人的框維持在畫面中央
-#   python3 hand_cam.py --servo --servo-dir 1    # 轉錯邊時換方向 (方向看馬達怎麼裝)
-#   python3 hand_cam.py --servo --servo-speed 4  # 還是會左右晃的話再轉慢一點
-#   python3 hand_cam.py --servo --servo-off      # 雲台待命，比 ok 才開始追人
+#   python3 hand_cam.py                          # 雲台預設鎖定，比 ok 才開始追人
+#   python3 hand_cam.py --servo-dir 1            # 轉錯邊時換方向 (方向看馬達怎麼裝)
+#   python3 hand_cam.py --servo-speed 4          # 還是會左右晃的話再轉慢一點
+#   python3 hand_cam.py --no-servo               # 完全停用雲台，只跑鏡頭與辨識
+#   python3 hand_cam.py --servo-on               # 如需啟動後立刻追人，可明確指定
 #   python3 hand_cam.py --image test_images/hand-1.jpg  # 單張圖片測試，結果存到 output/
 # --------------------------------------------------------------------------------------
 
@@ -745,7 +746,11 @@ def main():
     ap.add_argument("--mqtt-topic", default="edge/hand")
     ap.add_argument("--mqtt-hz", type=float, default=15)
     g = ap.add_argument_group("雲台 (servo，把人維持在畫面中央)")
-    g.add_argument("--servo", action="store_true", help="開啟雲台追人 (需要 servo.py 的硬體 PWM)")
+    servo_mode = g.add_mutually_exclusive_group()
+    servo_mode.add_argument("--servo", dest="servo", action="store_true",
+                            help="開啟雲台功能（已是預設；保留此參數以相容舊指令）")
+    servo_mode.add_argument("--no-servo", dest="servo", action="store_false",
+                            help="完全停用雲台，只執行鏡頭與辨識")
     g.add_argument("--servo-speed", type=float, default=8.0,
                    help="轉速 (度/秒)。兩次人物偵測之間馬達是盲轉的，轉太快會直接衝過停止門檻，"
                         "然後要回頭修正，看起來就是左右晃")
@@ -760,10 +765,14 @@ def main():
                    help="用哪個手勢開 / 關「跟著人轉」(比一次切換一次；空字串 = 不用手勢控制)")
     g.add_argument("--servo-toggle-cooldown", type=float, default=1.5,
                    help="切換後幾秒內不理會同一個手勢 (避免辨識閃爍時連切兩次)")
-    g.add_argument("--servo-wiggle-seconds", type=float, default=0.2,
+    g.add_argument("--servo-wiggle-seconds", type=float, default=0.5,
                    help="從鎖定切到跟隨時，鏡頭輕晃單段秒數；完整動作為四倍，0 = 關閉")
-    g.add_argument("--servo-off", action="store_true",
-                   help="一開始不要跟著人轉 (等比 --servo-toggle 手勢才開始)")
+    servo_start_mode = g.add_mutually_exclusive_group()
+    servo_start_mode.add_argument("--servo-off", dest="servo_off", action="store_true",
+                                  help="啟動時鎖定鏡頭（已是預設；保留以相容舊指令）")
+    servo_start_mode.add_argument("--servo-on", dest="servo_off", action="store_false",
+                                  help="啟動後立刻跟隨人物，不等待 OK 手勢")
+    g.set_defaults(servo=True, servo_off=True)
     g.add_argument("--servo-start", type=float, default=90.0, help="開機時的起始角度")
     g.add_argument("--servo-min", type=float, default=10.0, help="可轉範圍下限 (度)")
     g.add_argument("--servo-max", type=float, default=170.0, help="可轉範圍上限 (度)")
@@ -820,7 +829,8 @@ def main():
     panner = None
     if args.servo:
         if person is None:
-            sys.exit("--servo 需要人物偵測，--person-every 不能是 0")
+            sys.exit("雲台功能需要人物偵測，--person-every 不能是 0；"
+                     "若不使用雲台請加 --no-servo")
         try:
             motor = servo.Servo(args.servo_chip, args.servo_channel,
                                 args.servo_min_us, args.servo_max_us)
@@ -837,7 +847,7 @@ def main():
                   f"死區 {args.servo_deadband:.2f} / 停止 {args.servo_hold:.2f}"
                   f"，方向 {args.servo_dir:+d}"
                   f"{f'；手勢 {args.servo_toggle} = 開 / 關' if args.servo_toggle else ''}"
-                  f"{'，目前是關的' if args.servo_off else ''}")
+                  f"{'，目前鎖定（等待 OK 手勢）' if args.servo_off else '，目前正在跟隨'}")
         except OSError as e:          # 不在板子上 / 沒權限：其他功能照跑，不要整個掛掉
             print(f"雲台開不起來 (繼續跑，不控制馬達): {e}")
             panner = None
