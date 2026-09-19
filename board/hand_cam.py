@@ -543,7 +543,21 @@ def draw_hand(frame, px, py):
 
 
 # process() 每幀留下的資訊 (給主迴圈統計、決定這一幀偵測要看哪裡)
-STATE = types.SimpleNamespace(det_count=0, last_presences=[], last_det_ran=False)
+STATE = types.SimpleNamespace(det_count=0, last_presences=[], last_det_ran=False, last_gesture_debug=0.0)
+
+
+def debug_print_gesture(xy, raw, confirmed):
+    """--debug 時每 0.5 秒印一次手指判斷細節，方便對規則用的實際數字，不要猜"""
+    now = time.perf_counter()
+    if now - STATE.last_gesture_debug < 0.5:
+        return
+    STATE.last_gesture_debug = now
+    info = gesture.debug_features(xy)
+    print(f"[gesture] raw={raw} confirmed={confirmed} states={info['states']}")
+    print(f"          angles={info['angles']}")
+    print(f"          thumb_tip={info['thumb_tip']}  thumb_reach_ratio={info['thumb_reach_ratio']}"
+          f"  thumb_across_palm={info['thumb_across_palm']}")
+    print(f"          landmarks={info['landmarks']}")
 
 
 def process(frame, detector, landmark, person, tracker, args):
@@ -610,6 +624,8 @@ def process(frame, detector, landmark, person, tracker, args):
             if presence >= args.track_thresh:
                 raw = gesture.classify_landmarks(xy)
                 confirmed = track["smoother"].update(raw)
+                if args.debug:
+                    debug_print_gesture(xy, raw, confirmed)
                 pinch_r = gesture.pinch_ratio(xy)
                 pinched = track["pinch"].update(pinch_r)
                 accept(roi, xy, z, presence, track["score"], "track", (255, 255, 0), raw, confirmed,
@@ -650,6 +666,8 @@ def process(frame, detector, landmark, person, tracker, args):
                 smoother = gesture.GestureSmoother()
                 raw = gesture.classify_landmarks(xy)
                 confirmed = smoother.update(raw)
+                if args.debug:
+                    debug_print_gesture(xy, raw, confirmed)
                 pinch_det = gesture.PinchDetector()
                 pinch_r = gesture.pinch_ratio(xy)
                 pinched = pinch_det.update(pinch_r)

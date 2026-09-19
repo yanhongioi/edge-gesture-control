@@ -6,10 +6,18 @@
 #                 快速捏一下 = 點擊；捏住不放再移動 = 拖曳；拇指放開 = 放開左鍵
 #                 預先鎖定：拇指一開始靠近食指 (pinch_ratio < --prefreeze)，游標就先鎖住，
 #                 點擊發生在鎖住的位置 (拇指壓下時食指會被帶著晃，這樣晃了也不影響)
-#   two           捲動：食指、中指指向上 = 往上捲，指向下 = 往下捲 (橫的 = 暫停)
-#                 速度：基本速度 + 往手指方向推離起點 (比出 two 那一刻的手掌高度) 越遠越快
+#   two           捲動：拇指捏下 (壓向食指根部) = 往上捲，拇指放開 = 往下捲
+#                 速度：基本速度 + 往捲動方向推離起點 (換方向時重算) 越遠越快
 #                 短暫掉幀 (--scroll-hold 秒以內) 用原本的速度繼續捲，起點不重算
-#   open / fist / 其他  不動作 (open 是起手式；fist 是拿刀具時的手，永遠不能觸發)
+#                 一比出 two 就會開始捲，沒有「停在原地」的狀態 —— 要停就別比 two
+#   open + 捏合    播放/暫停 (張開手掌再捏一下；放開手掌就能再捏一次)
+#   four          切換視窗 (Alt+Tab)（四指伸直、拇指收攏貼手掌）
+#                 以上是「一次性動作」：比出來只送一次，要先回到中立姿勢才能再觸發
+#                 (中立 = 手掌張開沒捏 / 握拳 / 手移出畫面)。--action-map 可以改對應
+#   rock + 捏合    音量加大        rock  音量減小
+#                 音量是「連發動作」：穩定比著 --action-hold 秒後開始，之後每
+#                 --action-repeat 秒調一階 (一次按鍵只動 2%，不連發調不動)
+#   open / fist / 其他  不動作 (open 沒捏是起手式兼中立；fist 是拿刀具時的手，永遠不能觸發)
 #
 #   捏合判斷在板子上 (board/gesture.py 的 PinchDetector)，這裡用 MQTT 的 hands[].pinch
 #   手不見、換成其他手勢、資料中斷、程式結束 → 游標模式結束，按住的左鍵一律放開
@@ -23,6 +31,7 @@
 # 結束: Ctrl+C
 # --------------------------------------------------------------------------------------
 
+import os
 import sys
 import json
 import math
@@ -34,12 +43,32 @@ from collections import deque
 
 import paho.mqtt.client as mqtt
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from pc.control import hotkeys                                      # noqa: E402
+
 TOPIC = "edge/hand"
 INDEX_TIP = 8                  # MediaPipe 21 點：8 = 食指尖
 ANCHORS = {"tip": 8, "pip": 6, "mcp": 5}    # 游標跟哪個點：食指尖 / 食指第一節關節 / 食指根部
 PALM = (0, 5, 9, 13, 17)       # 手腕 + 四指根部，平均起來當作手掌中心
 CURSOR_GESTURE = "point"
 SCROLL_GESTURE = "two"
+
+# 一次性快捷鍵 (見 GestureActionDispatcher)
+# 觸發條件是「手勢 + 捏合狀態」的組合，寫成 token：手勢名稱，捏著的話加上 "+pinch"。
+# 這樣 open (張開手掌) 和 open+pinch (張開手掌再捏一下) 才分得開 —— 前者是中立，後者觸發動作。
+PINCH_SUFFIX = "+pinch"
+# 中立 token：看到其中之一才會重新「上膛」，同一個姿勢維持著不會連發。
+# open 沒捏 = 起手式；fist 按設計永遠不觸發任何動作 (拿刀具的手)；手不見 = None。
+NEUTRAL_TOKENS = (None, "open", "fist")
+DEFAULT_ACTION_MAP = {"open" + PINCH_SUFFIX: "play_pause", "four": "alt_tab",
+                      "rock" + PINCH_SUFFIX: "volume_up", "rock": "volume_down"}
+# board/gesture.py classify_landmarks() 會回傳的全部手勢
+KNOWN_GESTURES = ("point", "two", "three", "four", "six", "rock", "ok", "open", "fist",
+                  "thumbs_up")
+# 這些手勢已經有其他用途，捏不捏合都不可以再綁快捷鍵：
+#   point 游標 (+pinch 是點擊 / 拖曳)、two 捲動、fist 安全考量永遠不觸發
+RESERVED_GESTURES = (CURSOR_GESTURE, SCROLL_GESTURE, "fist")
+
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_WHEEL = 0x0800
@@ -198,7 +227,7 @@ class CursorController:
             self.state, self.moves, self.pos, self.other_since = "move", 0, None, None
             self.armed, self.lock_pos = False, None
             self.fx.reset(); self.fy.reset(); self.history.clear()
-            print(f"  ▶ 游標模式開始（{CURSOR_GESTURE}）")
+            print(f"  ● 游標模式開始（{CURSOR_GESTURE}）")
 
         # 換成其他手勢：先停住，超過 grace 秒才結束 (中間的誤判不會打斷拖曳)
         if g != CURSOR_GESTURE:
@@ -221,13 +250,13 @@ class CursorController:
                 if self.lock_pos:
                     self._set(*self.lock_pos, t)
                 if a.dry_run:
-                    print(f"  🔒 預先鎖定 (pinch_ratio {ratio:.2f})")
+                    print(f"  [鎖] 預先鎖定 (pinch_ratio {ratio:.2f})")
             elif self.lock_pos is not None and not pinched and (
                     ratio > a.prefreeze + 0.05 or t - self.lock_since > a.lock_timeout):
                 self.lock_pos = None                    # 拇指抬回去 (或鎖太久)：解鎖，從目前位置接續
                 self._restart_filter(t)
                 if a.dry_run:
-                    print(f"  🔓 解鎖 (pinch_ratio {ratio:.2f})")
+                    print(f"  [解鎖] 解鎖 (pinch_ratio {ratio:.2f})")
 
         if pinched and self.state == "move" and self.armed:
             target = self.lock_pos or self._back_pos()
@@ -265,9 +294,15 @@ class CursorController:
 
 class ScrollJoystick:
     """two 捲動：
-      方向 = 食指、中指指的方向：指向上 = 往上捲，指向下 = 往下捲，橫的 = 暫停
-      速度 = 基本速度 + 往手指方向推離起點越遠越快 (起點 = 比出 two 那一刻的手掌高度)
-      短暫掉幀 (手不見 / 手勢跳掉) --scroll-hold 秒以內：用原本的速度繼續捲，起點和方向都保留"""
+      方向 = 拇指：捏合 (拇指壓向食指根部) = 往上捲，沒捏 (拇指放開) = 往下捲
+             用拇指而不是手指指向，是因為上下捲要切換時手腕不用整個翻過來，
+             而且兩個方向都維持同一個舒服的手勢
+      速度 = 基本速度 + 往捲動方向推離起點越遠越快
+             起點 = 開始往這個方向捲那一刻的手掌高度 (換方向時重算)
+      短暫掉幀 (手不見 / 手勢跳掉) --scroll-hold 秒以內：用原本的速度繼續捲，起點和方向都保留
+
+    注意：一比出 two 就會開始捲 (沒捏 = 往下)，沒有「停在原地」的狀態 —— 要停就別比 two。
+    捏合判斷在板子上 (board/gesture.py 的 PinchDetector)，已經過遲滯 + 連續幀，不會逐幀閃。"""
 
     def __init__(self, args):
         self.args = args
@@ -277,19 +312,9 @@ class ScrollJoystick:
         self.lost_since = None
 
     @staticmethod
-    def direction(lm):
-        """食指 + 中指：根部 → 指尖的方向。上 = +1、下 = -1、橫的或算不出來 = 0"""
-        bx, by = (lm[5][0] + lm[9][0]) / 2, (lm[5][1] + lm[9][1]) / 2
-        tx, ty = (lm[8][0] + lm[12][0]) / 2, (lm[8][1] + lm[12][1]) / 2
-        dx, dy = tx - bx, ty - by
-        n = math.hypot(dx, dy)
-        if n < 1e-6:
-            return 0
-        if dy < -0.5 * n:           # 畫面 y 往上變小：指尖在根部上方 = 指向上
-            return 1
-        if dy > 0.5 * n:
-            return -1
-        return 0
+    def direction(hand):
+        """捏合 = 往上 (+1)，沒捏 = 往下 (-1)"""
+        return 1 if hand.get("pinch") else -1
 
     def update(self, hand, t):
         a = self.args
@@ -306,20 +331,155 @@ class ScrollJoystick:
         y = sum(lm[i][1] for i in PALM) / len(PALM)
         if self.anchor is None:
             self.anchor = y
-            print(f"  ▶ 捲動模式（{SCROLL_GESTURE}）：手指指向上 = 往上捲，指向下 = 往下捲")
-        d = self.direction(lm)
+            print(f"  ● 捲動模式（{SCROLL_GESTURE}）：拇指捏下 = 往上捲，放開 = 往下捲")
+        d = self.direction(hand)
         if d != self.dir:
-            print({1: "    ↑ 往上捲", -1: "    ↓ 往下捲", 0: "    ‖ 暫停（手指是橫的）"}[d])
+            print({1: "    ↑ 往上捲（捏合）", -1: "    ↓ 往下捲（放開）"}[d])
             self.dir = d
-        if d == 0:
-            self.rate = 0.0
-            return
-        push = (self.anchor - y) if d > 0 else (y - self.anchor)    # 往手指方向推離起點的量
+            self.anchor = y         # 換方向：起點重算，從基本速度重新開始加速
+        push = (self.anchor - y) if d > 0 else (y - self.anchor)    # 往捲動方向推離起點的量
         speed = min(a.scroll_max, a.scroll_base + a.scroll_gain * max(0.0, push - a.scroll_dead))
         self.rate = -speed * d if a.scroll_invert else speed * d
 
     def stop(self):
         self.anchor, self.rate, self.dir, self.lost_since = None, 0.0, 0, None
+
+
+def gesture_token(hand):
+    """(手勢, 捏合) → 觸發用的 token。手不見時是 None。
+    捏合狀態是板子算的 (board/gesture.py 的 PinchDetector)，已經過遲滯 + 連續幀。"""
+    g = hand.get("gesture") if hand else None
+    if g is None:
+        return None
+    return g + PINCH_SUFFIX if hand.get("pinch") else g
+
+
+class GestureActionDispatcher:
+    """快捷鍵。和 point/two 的「連續模式」不同：在『token 改變』的那一瞬間送，不是每幀送。
+
+    兩種動作 (哪些會連發見 hotkeys.REPEAT_ACTIONS)：
+      一次性 (播放/暫停、切視窗)  比出來只送一次，要先回到中立姿勢才能再送
+      連發   (音量+/-)            比出來先送一次，持續比著就每隔 --action-repeat 秒再送一次
+                                 Windows 音量一次只動 2%，不連發根本調不動
+
+    一次性動作的防連發有兩道，缺一不可：
+      armed  觸發後就「卸膛」，要先看到中立 token (open 沒捏 / fist / 手不見) 才會重新上膛。
+             沒有這個的話，捏著不放 = 音樂瘋狂 play/pause。
+      cooldown  擋住 open+pinch → open → open+pinch 這種一瞬間的抖動 (中間的 open 會重新上膛)。
+
+    連發動作的第一次也要通過這兩道 (所以 rock → four 不會直接觸發，跟以前一樣)，
+    但之後的連發不再檢查 —— 那是同一次「按住」的延續，不是新的觸發。
+
+    open / open+pinch 這組搭配得剛好：張開手掌是中立，捏一下觸發，放開就自動重新上膛。
+
+    只有游標和捲動都沒在跑的時候才會被呼叫，所以拖曳 / 捲動中途不會誤觸。"""
+
+    def __init__(self, args, sender=None):
+        self.args = args
+        self.action_map = args.action_map
+        self.sender = sender or hotkeys.HotkeySender(dry_run=args.dry_run)
+        self.last = None
+        self.armed = True
+        self.cooldown_until = 0.0
+        self.repeat_at = None            # 下一次送出的時間 (None = 這個姿勢不是連發動作)
+        self.repeating = False           # 已經開始連發 (第一次已經送出去了)
+        self.last_repeat = False         # 上一個送出的動作是不是連發動作 (音量上下互切用)
+
+    def _fire(self, token, action, repeat=False):
+        """送出動作；回傳是否成功 (失敗就不要再連發下去)"""
+        try:
+            label = self.sender.fire(action)
+        except hotkeys.HotkeyError as exc:
+            print(f"  ※ {token} → {action} 失敗：{exc}")
+            return False
+        if not repeat:                   # 連發不逐次印，不然畫面會被洗版
+            print(f"  ★ {token} → {label}"
+                  + ("  [dry-run，沒有真的送出]" if self.args.dry_run else ""))
+        return True
+
+    def update(self, hand, t):
+        token = gesture_token(hand)
+        changed = token != self.last
+        self.last = token
+        if token in NEUTRAL_TOKENS:
+            self.armed = True
+            self.repeat_at, self.repeating = None, False
+            self.last_repeat = False
+            return
+        action = self.action_map.get(token)
+        if action is None:
+            self.repeat_at, self.repeating = None, False
+            return
+        repeats = action in hotkeys.REPEAT_ACTIONS
+
+        if changed:                      # 新的觸發
+            self.repeat_at, self.repeating = None, False
+            # 連發動作之間可以直接互換 (音量調小 → 捏合 → 調大)，不用中間先回中立：
+            # 兩邊都是同一類的連續調整，硬要張開手掌再比一次很不合手。
+            # 要切到一次性動作 (播放/暫停、切視窗) 仍然必須回中立，避免手勢過渡時誤觸。
+            if not self.armed and not (repeats and self.last_repeat):
+                return
+            if t < self.cooldown_until and not (repeats and self.last_repeat):
+                return
+            if repeats:
+                # 連發動作先不送：要穩定比著 --action-hold 秒才開始調整。
+                # 手在換姿勢的過程中常被判成別的手勢一兩幀，沒有這道就會被瞬間掃過去的
+                # rock 調掉音量。姿勢中途變掉 (包括捏合狀態變了) 就重新計時。
+                self.repeat_at = t + self.args.action_hold
+                return
+            self.armed = False
+            self.last_repeat = False
+            self.cooldown_until = t + self.args.action_cooldown
+            self._fire(token, action)
+            return
+
+        # 同一個姿勢持續中：只有連發動作會繼續送
+        if self.repeat_at is None or t < self.repeat_at:
+            return
+        first = not self.repeating
+        if not self._fire(token, action, repeat=not first):
+            self.repeat_at = None        # 送不出去就別再連發下去
+            return
+        if first:                        # 撐過 --action-hold，正式開始調整
+            self.armed = False
+            self.repeating = True
+            self.last_repeat = True
+        self.repeat_at = t + self.args.action_repeat
+
+    def stop(self):
+        """收尾：確保沒有修飾鍵卡在按住的狀態 (見 hotkeys.py 的說明)"""
+        self.sender.release_modifiers()
+
+
+def parse_action_map(text):
+    """"open+pinch=play_pause,four=alt_tab" → dict。
+    token 是「手勢」或「手勢+pinch」(比出該手勢並且捏合)。
+    名稱錯了就直接報錯，不要讓使用者以為綁好了、到現場才發現沒反應。"""
+    mapping = {}
+    for pair in text.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        token, sep, action = (s.strip() for s in pair.partition("="))
+        if not sep or not token or not action:
+            raise argparse.ArgumentTypeError(f"格式要是 手勢=動作，收到 {pair!r}")
+        base = token[:-len(PINCH_SUFFIX)] if token.endswith(PINCH_SUFFIX) else token
+        if base not in KNOWN_GESTURES:
+            raise argparse.ArgumentTypeError(
+                f"沒有 {base!r} 這個手勢（可用：{', '.join(KNOWN_GESTURES)}；"
+                f"要加上捏合就寫成 手勢{PINCH_SUFFIX}）")
+        if base in RESERVED_GESTURES:
+            raise argparse.ArgumentTypeError(
+                f"{base!r} 已經有其他用途（游標 / 點擊 / 捲動 / 安全考量），不能綁快捷鍵")
+        if token in NEUTRAL_TOKENS:
+            raise argparse.ArgumentTypeError(
+                f"{token!r} 是中立姿勢（用來讓快捷鍵重新上膛），不能綁快捷鍵；"
+                f"改綁 {token}{PINCH_SUFFIX}（比這個手勢並捏合）")
+        if action not in hotkeys.ACTIONS:
+            raise argparse.ArgumentTypeError(
+                f"沒有 {action!r} 這個動作（可用：{', '.join(sorted(hotkeys.ACTIONS))}）")
+        mapping[token] = action
+    return mapping
 
 
 def main():
@@ -352,15 +512,33 @@ def main():
                    help="捏下後游標先停住幾秒 (這段時間內放開 = 原地點擊)")
     g.add_argument("--release-settle", type=float, default=0.1, help="放開後游標停住幾秒")
     g = ap.add_argument_group("捲動 (two)")
-    g.add_argument("--scroll-base", type=float, default=360,
-                   help="基本捲動速度 (每秒滾輪單位，120 = 一格；預設 360 = 每秒 3 格)")
-    g.add_argument("--scroll-gain", type=float, default=12000,
-                   help="加速：往手指方向推離起點 (畫面高度比例) × 這個值 = 額外的每秒滾輪單位")
-    g.add_argument("--scroll-dead", type=float, default=0.03, help="推離起點多少比例以內不加速")
-    g.add_argument("--scroll-max", type=float, default=3000, help="最快每秒幾個滾輪單位")
+    g.add_argument("--scroll-base", type=float, default=120,
+                   help="基本捲動速度 (每秒滾輪單位，120 = 一格；預設 120 = 每秒 1 格)")
+    g.add_argument("--scroll-gain", type=float, default=3000,
+                   help="加速：往捲動方向推離起點 (畫面高度比例) × 這個值 = 額外的每秒滾輪單位"
+                        " (預設 3000 = 推離 10%% 畫面高度多加每秒 1.25 格)")
+    g.add_argument("--scroll-dead", type=float, default=0.05,
+                   help="推離起點多少比例以內不加速 (越大越不容易手一抖就加速)")
+    g.add_argument("--scroll-max", type=float, default=1200,
+                   help="最快每秒幾個滾輪單位 (預設 1200 = 每秒 10 格)")
     g.add_argument("--scroll-hold", type=float, default=0.5,
                    help="手或手勢短暫不見時，繼續用原本速度捲幾秒 (起點不重算)")
     g.add_argument("--scroll-invert", action="store_true", help="上下反過來")
+    g = ap.add_argument_group("快捷鍵 (一次性動作)")
+    default_map = ",".join(f"{k}={v}" for k, v in DEFAULT_ACTION_MAP.items())
+    g.add_argument("--action-map", type=parse_action_map, default=DEFAULT_ACTION_MAP,
+                   metavar="手勢=動作,...",
+                   help=f"手勢對應的快捷鍵（預設 {default_map}）。可用動作："
+                        + "、".join(f"{n} {label}" for n, label in hotkeys.iter_actions()))
+    g.add_argument("--action-cooldown", type=float, default=1.0,
+                   help="送出一次快捷鍵後，幾秒內不再送 (預設 1.0)")
+    g.add_argument("--action-hold", type=float, default=1.0,
+                   help="連發動作 (音量) 要穩定比著幾秒才開始調整 (預設 1.0)；"
+                        "中途手勢變掉就重新計時，手勢過渡時掃過去不會誤調")
+    g.add_argument("--action-repeat", type=float, default=0.25,
+                   help="連發動作每隔幾秒送一次 (預設 0.25 = 每秒 4 次；"
+                        "Windows 音量一次 2%%，約每秒 8%%)")
+    g.add_argument("--no-actions", action="store_true", help="關閉所有快捷鍵")
     ap.add_argument("--stale", type=float, default=0.5, help="超過幾秒沒收到資料就停止動作")
     ap.add_argument("--dry-run", action="store_true", help="只印出動作，不真的控制電腦")
     args = ap.parse_args()
@@ -374,6 +552,7 @@ def main():
         screen = (1920, 1080)
     cursor = CursorController(args, screen)
     scroll = ScrollJoystick(args)
+    actions = None if args.no_actions else GestureActionDispatcher(args)
     lock = threading.Lock()
     state = {"stamp": 0.0}
 
@@ -397,6 +576,9 @@ def main():
             elif scroll.anchor is not None:               # 換成 point (游標模式)：捲動立刻停
                 print("  ■ 停止捲動（換成游標）")
                 scroll.stop()
+            # 快捷鍵只在游標和捲動都閒置時才看，拖曳 / 捲動中途不會誤觸
+            if actions is not None and cursor.state == "idle" and scroll.anchor is None:
+                actions.update(hand, now)
             state["stamp"] = now
 
     try:
@@ -410,8 +592,13 @@ def main():
 
     click = "" if args.no_click else "，point + 捏合 = 按住左鍵（點擊 / 拖曳）"
     print(f"手勢對應: {CURSOR_GESTURE} = 游標 (跟著 {args.anchor}){click}，"
-          f"{SCROLL_GESTURE} = 捲動 (手指向上 / 向下)"
+          f"{SCROLL_GESTURE} = 捲動 (捏合 = 往上 / 放開 = 往下)"
           f"{'  [dry-run，不會真的控制]' if args.dry_run else ''}")
+    if actions is not None:
+        pairs = "，".join(f"{t} = {hotkeys.describe(a)}" for t, a in sorted(args.action_map.items()))
+        print(f"快捷鍵: {pairs}"
+              f"（+pinch = 比該手勢並捏合；觸發後要先回到中立姿勢"
+              f"「手掌張開沒捏 / 握拳 / 手收起來」才能再觸發一次）")
     print(f"螢幕 {screen[0]}x{screen[1]}，鏡頭畫面中央 {args.region:.0%} 對應整個螢幕"
           f"{'，左右翻轉 (板子已翻轉的話自動不重複翻)' if not args.no_mirror else ''}。Ctrl+C 結束。")
 
@@ -441,6 +628,8 @@ def main():
     finally:
         with lock:
             cursor.stop("（程式結束）")                  # 左鍵一定要放開
+            if actions is not None:
+                actions.stop()                           # 修飾鍵 (Alt) 一定要放開
         client.loop_stop()
         client.disconnect()
         print("結束")
