@@ -5,8 +5,10 @@
 #   sh usb_net.sh          # NCM 模式 (Windows 11 內建驅動)
 #   sh usb_net.sh rndis    # RNDIS 模式 (附 Microsoft OS 描述，讓 Windows 自動裝網卡驅動)
 #   sh usb_net.sh stop     # 關閉
+#   sh usb_net.sh dhcp     # 只 (重新) 啟動 usb0 上的 DHCP
 #
-# 板子 IP: 192.168.7.2/24，筆電那張 USB 網卡請設 192.168.7.1/24
+# 板子 IP: 192.168.7.2/24。電腦那張 USB 網卡設「自動取得 IP」就會拿到 192.168.7.1 (板子上的 udhcpd 發的，
+# 不發預設閘道 / DNS，電腦照樣用自己的網路上網)；手動設 192.168.7.1/24 也可以
 # 接線: 筆電 USB-A --(A 對 C 線)--> 板子 USB1_C  (用 C 對 C 線時板子可能被協商成 host)
 
 set -e
@@ -15,7 +17,33 @@ G=/sys/kernel/config/usb_gadget/imx93net
 BOARD_IP=192.168.7.2/24
 HOST_MAC=02:00:00:00:93:01
 DEV_MAC=02:00:00:00:93:02
+DHCP_CONF=/tmp/udhcpd_usb0.conf
+DHCP_PID=/tmp/udhcpd_usb0.pid
 
+stop_dhcp() {
+    if [ -f "$DHCP_PID" ]; then kill "$(cat "$DHCP_PID")" 2>/dev/null || true; rm -f "$DHCP_PID"; fi
+}
+
+start_dhcp() {
+    if [ -f "$DHCP_PID" ] && kill -0 "$(cat "$DHCP_PID")" 2>/dev/null; then
+        echo "dhcp: already running (usb0 -> 192.168.7.1)"
+        return 0
+    fi
+    if ! command -v udhcpd >/dev/null 2>&1; then
+        echo "dhcp: udhcpd not found, set the laptop's USB adapter to 192.168.7.1/24 by hand"
+        return 0
+    fi
+    printf '%s\n' "interface usb0" "start 192.168.7.1" "end 192.168.7.1" "max_leases 1" \
+        "lease_file /tmp/udhcpd_usb0.leases" "pidfile $DHCP_PID" \
+        "option subnet 255.255.255.0" "option lease 86400" > "$DHCP_CONF"
+    touch /tmp/udhcpd_usb0.leases
+    udhcpd "$DHCP_CONF" && echo "dhcp: usb0 hands out 192.168.7.1 (no gateway / DNS)"
+}
+
+if [ "$MODE" = "dhcp" ]; then
+    start_dhcp
+    exit 0
+fi
 stop_gadget() {
     [ -d "$G" ] || return 0
     echo "" > "$G/UDC" 2>/dev/null || true
@@ -27,6 +55,7 @@ stop_gadget() {
 
 # 舊的 g_ether 會占用 USB 控制器，先卸載
 if lsmod | grep -q '^g_ether'; then rmmod g_ether; fi
+stop_dhcp
 stop_gadget
 if [ "$MODE" = "stop" ]; then
     echo "USB network stopped"
@@ -79,5 +108,6 @@ IFACE=$(cat "$G/functions/$F/ifname")
 ip addr flush dev "$IFACE"
 ip addr add "$BOARD_IP" dev "$IFACE"
 ip link set "$IFACE" up
+start_dhcp
 sleep 1
 echo "mode=$MODE iface=$IFACE ip=$BOARD_IP udc=$UDC state=$(cat /sys/class/udc/$UDC/state)"

@@ -10,6 +10,7 @@ CONF=/etc/wpa_hotspot.conf
 UDC_STATE=/sys/class/udc/$(ls /sys/class/udc | head -n 1)/state
 if ip -4 addr show usb0 2>/dev/null | grep -q "192.168.7.2/" && [ "$(cat "$UDC_STATE")" = "configured" ]; then
     echo "usb : already up (192.168.7.2, configured)"
+    sh "$DIR/usb_net.sh" dhcp
 else
     sh "$DIR/usb_net.sh" || echo "usb : FAILED (see docs/setup.md 3-D)"
     # 給筆電幾秒辨識
