@@ -5,3 +5,4 @@
 *.ps1 text eol=crlf
 *.tflite binary
 *.jpg binary
+*.ini text eol=lf
