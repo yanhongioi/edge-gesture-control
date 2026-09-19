@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 
+from pc.audio.board_wake import DEFAULT_WAKE_TOPIC, BoardWakeError, BoardWakeListener
 from pc.audio.pipeline import VoiceCommandPipeline
 from pc.audio.network_recorder import DEFAULT_AUDIO_PORT, NetworkAudioStream
 from pc.audio.recorder import AudioInputError, MicrophoneStream, list_input_devices
@@ -56,6 +58,12 @@ def main() -> int:
     )
     parser.add_argument("--board-audio-port", type=int, default=DEFAULT_AUDIO_PORT)
     parser.add_argument("--wake-phrase", default=DEFAULT_WAKE_PHRASE)
+    parser.add_argument(
+        "--mqtt-wake",
+        metavar="BROKER",
+        help="改用板子 VIT 的喚醒訊號 (MQTT edge/voice)：沒喚醒的句子不跑 Whisper",
+    )
+    parser.add_argument("--mqtt-wake-topic", default=DEFAULT_WAKE_TOPIC)
     parser.add_argument("--model", default="turbo", help="faster-whisper 模型名稱")
     parser.add_argument("--asr-device", choices=("cuda", "cpu"), default="cuda")
     parser.add_argument("--compute-type", default="int8_float16")
@@ -114,12 +122,32 @@ def main() -> int:
         else:
             audio_input = MicrophoneStream(device=_device_argument(args.device))
             source_label = "電腦麥克風"
-        print(f"[{mode_label}] 等待喚醒詞「{args.wake_phrase}」；按 Ctrl+C 結束。")
+        wake_gate = pipeline.wake_gate
+        board_wake: contextlib.AbstractContextManager[object]
+        if args.mqtt_wake:
+
+            def on_board_wake(wakeword: str) -> None:
+                wake_gate.arm()
+                print(f"[已喚醒] 板子偵測到「{wakeword}」，請在 8 秒內說出指令。")
+
+            board_wake = BoardWakeListener(
+                args.mqtt_wake, on_board_wake, topic=args.mqtt_wake_topic
+            )
+            print(
+                f"[{mode_label}] 等待板子 VIT 喚醒 "
+                f"(MQTT {args.mqtt_wake} {args.mqtt_wake_topic})；按 Ctrl+C 結束。"
+            )
+        else:
+            board_wake = contextlib.nullcontext()
+            print(f"[{mode_label}] 等待喚醒詞「{args.wake_phrase}」；按 Ctrl+C 結束。")
         print(f"[音訊來源] {source_label}")
-        with audio_input as microphone:
+        with board_wake, audio_input as microphone:
             while True:
                 utterance = segmenter.accept(microphone.read_chunk())
                 if utterance is None:
+                    continue
+                if args.mqtt_wake and not wake_gate.is_armed():
+                    print("[略過] 板子沒有喚醒，這句不送 Whisper。")
                     continue
 
                 transcript = transcriber.transcribe(utterance)
@@ -159,12 +187,15 @@ def main() -> int:
                         print(f"[TTS 警告] {exc}", file=sys.stderr)
 
                 segmenter.reset()
-                microphone.flush()
+                if result.decision.status != "armed":
+                    # 只喚醒、還沒有指令時不要丟掉緩衝：轉文字的這段時間使用者可能已經開始講指令
+                    microphone.flush()
     except KeyboardInterrupt:
         print("\n語音助理已停止。")
         return 0
     except (
         AudioInputError,
+        BoardWakeError,
         VadError,
         TranscriptionError,
         BrowserControlError,
