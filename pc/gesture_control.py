@@ -6,9 +6,10 @@
 #                 快速捏一下 = 點擊；捏住不放再移動 = 拖曳；拇指放開 = 放開左鍵
 #                 預先鎖定：拇指一開始靠近食指 (pinch_ratio < --prefreeze)，游標就先鎖住，
 #                 點擊發生在鎖住的位置 (拇指壓下時食指會被帶著晃，這樣晃了也不影響)
-#   two           捲動：食指、中指指向上 = 往上捲，指向下 = 往下捲 (橫的 = 暫停)
-#                 速度：基本速度 + 往手指方向推離起點 (比出 two 那一刻的手掌高度) 越遠越快
+#   two           捲動：拇指捏下 (壓向食指根部) = 往上捲，拇指放開 = 往下捲
+#                 速度：基本速度 + 往捲動方向推離起點 (換方向時重算) 越遠越快
 #                 短暫掉幀 (--scroll-hold 秒以內) 用原本的速度繼續捲，起點不重算
+#                 一比出 two 就會開始捲，沒有「停在原地」的狀態 —— 要停就別比 two
 #   open + 捏合    播放/暫停 (張開手掌再捏一下；放開手掌就能再捏一次)
 #   thumbs_up     切換視窗 (Alt+Tab)
 #                 這兩個是「一次性動作」：比出來只送一次，要先回到中立姿勢才能再觸發
@@ -221,7 +222,7 @@ class CursorController:
             self.state, self.moves, self.pos, self.other_since = "move", 0, None, None
             self.armed, self.lock_pos = False, None
             self.fx.reset(); self.fy.reset(); self.history.clear()
-            print(f"  ▶ 游標模式開始（{CURSOR_GESTURE}）")
+            print(f"  ● 游標模式開始（{CURSOR_GESTURE}）")
 
         # 換成其他手勢：先停住，超過 grace 秒才結束 (中間的誤判不會打斷拖曳)
         if g != CURSOR_GESTURE:
@@ -244,13 +245,13 @@ class CursorController:
                 if self.lock_pos:
                     self._set(*self.lock_pos, t)
                 if a.dry_run:
-                    print(f"  🔒 預先鎖定 (pinch_ratio {ratio:.2f})")
+                    print(f"  [鎖] 預先鎖定 (pinch_ratio {ratio:.2f})")
             elif self.lock_pos is not None and not pinched and (
                     ratio > a.prefreeze + 0.05 or t - self.lock_since > a.lock_timeout):
                 self.lock_pos = None                    # 拇指抬回去 (或鎖太久)：解鎖，從目前位置接續
                 self._restart_filter(t)
                 if a.dry_run:
-                    print(f"  🔓 解鎖 (pinch_ratio {ratio:.2f})")
+                    print(f"  [解鎖] 解鎖 (pinch_ratio {ratio:.2f})")
 
         if pinched and self.state == "move" and self.armed:
             target = self.lock_pos or self._back_pos()
@@ -286,9 +287,15 @@ class CursorController:
 
 class ScrollJoystick:
     """two 捲動：
-      方向 = 食指、中指指的方向：指向上 = 往上捲，指向下 = 往下捲，橫的 = 暫停
-      速度 = 基本速度 + 往手指方向推離起點越遠越快 (起點 = 比出 two 那一刻的手掌高度)
-      短暫掉幀 (手不見 / 手勢跳掉) --scroll-hold 秒以內：用原本的速度繼續捲，起點和方向都保留"""
+      方向 = 拇指：捏合 (拇指壓向食指根部) = 往上捲，沒捏 (拇指放開) = 往下捲
+             用拇指而不是手指指向，是因為上下捲要切換時手腕不用整個翻過來，
+             而且兩個方向都維持同一個舒服的手勢
+      速度 = 基本速度 + 往捲動方向推離起點越遠越快
+             起點 = 開始往這個方向捲那一刻的手掌高度 (換方向時重算)
+      短暫掉幀 (手不見 / 手勢跳掉) --scroll-hold 秒以內：用原本的速度繼續捲，起點和方向都保留
+
+    注意：一比出 two 就會開始捲 (沒捏 = 往下)，沒有「停在原地」的狀態 —— 要停就別比 two。
+    捏合判斷在板子上 (board/gesture.py 的 PinchDetector)，已經過遲滯 + 連續幀，不會逐幀閃。"""
 
     def __init__(self, args):
         self.args = args
@@ -298,19 +305,9 @@ class ScrollJoystick:
         self.lost_since = None
 
     @staticmethod
-    def direction(lm):
-        """食指 + 中指：根部 → 指尖的方向。上 = +1、下 = -1、橫的或算不出來 = 0"""
-        bx, by = (lm[5][0] + lm[9][0]) / 2, (lm[5][1] + lm[9][1]) / 2
-        tx, ty = (lm[8][0] + lm[12][0]) / 2, (lm[8][1] + lm[12][1]) / 2
-        dx, dy = tx - bx, ty - by
-        n = math.hypot(dx, dy)
-        if n < 1e-6:
-            return 0
-        if dy < -0.5 * n:           # 畫面 y 往上變小：指尖在根部上方 = 指向上
-            return 1
-        if dy > 0.5 * n:
-            return -1
-        return 0
+    def direction(hand):
+        """捏合 = 往上 (+1)，沒捏 = 往下 (-1)"""
+        return 1 if hand.get("pinch") else -1
 
     def update(self, hand, t):
         a = self.args
@@ -327,15 +324,13 @@ class ScrollJoystick:
         y = sum(lm[i][1] for i in PALM) / len(PALM)
         if self.anchor is None:
             self.anchor = y
-            print(f"  ▶ 捲動模式（{SCROLL_GESTURE}）：手指指向上 = 往上捲，指向下 = 往下捲")
-        d = self.direction(lm)
+            print(f"  ● 捲動模式（{SCROLL_GESTURE}）：拇指捏下 = 往上捲，放開 = 往下捲")
+        d = self.direction(hand)
         if d != self.dir:
-            print({1: "    ↑ 往上捲", -1: "    ↓ 往下捲", 0: "    ‖ 暫停（手指是橫的）"}[d])
+            print({1: "    ↑ 往上捲（捏合）", -1: "    ↓ 往下捲（放開）"}[d])
             self.dir = d
-        if d == 0:
-            self.rate = 0.0
-            return
-        push = (self.anchor - y) if d > 0 else (y - self.anchor)    # 往手指方向推離起點的量
+            self.anchor = y         # 換方向：起點重算，從基本速度重新開始加速
+        push = (self.anchor - y) if d > 0 else (y - self.anchor)    # 往捲動方向推離起點的量
         speed = min(a.scroll_max, a.scroll_base + a.scroll_gain * max(0.0, push - a.scroll_dead))
         self.rate = -speed * d if a.scroll_invert else speed * d
 
@@ -527,7 +522,7 @@ def main():
 
     click = "" if args.no_click else "，point + 捏合 = 按住左鍵（點擊 / 拖曳）"
     print(f"手勢對應: {CURSOR_GESTURE} = 游標 (跟著 {args.anchor}){click}，"
-          f"{SCROLL_GESTURE} = 捲動 (手指向上 / 向下)"
+          f"{SCROLL_GESTURE} = 捲動 (捏合 = 往上 / 放開 = 往下)"
           f"{'  [dry-run，不會真的控制]' if args.dry_run else ''}")
     if actions is not None:
         pairs = "，".join(f"{t} = {hotkeys.describe(a)}" for t, a in sorted(args.action_map.items()))

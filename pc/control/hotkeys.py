@@ -70,7 +70,7 @@ ACTIONS: dict[str, tuple[tuple[KeyEvent, ...], str]] = {
     "prev_track": (tap(VK_MEDIA_PREV_TRACK, extended=True), "上一首"),
     "mute": (tap(VK_VOLUME_MUTE, extended=True), "靜音"),
     "volume_up": (tap(VK_VOLUME_UP, extended=True), "音量+"),
-    "volume_down": (tap(VK_VOLUME_DOWN, extended=True), "音量−"),
+    "volume_down": (tap(VK_VOLUME_DOWN, extended=True), "音量-"),
 }
 
 
