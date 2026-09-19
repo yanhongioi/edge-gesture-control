@@ -19,6 +19,7 @@ import os
 import sys
 import time
 import argparse
+import threading
 
 PWM_ROOT = "/sys/class/pwm"
 
@@ -98,6 +99,66 @@ class Servo:
     def off(self):
         """關掉訊號：馬達不再出力 (可以用手轉動)"""
         self._write("enable", 0)
+
+
+# --------------------------------------------------------------------------------------
+# 定速轉動 (雲台追人用)
+# --------------------------------------------------------------------------------------
+class Panner:
+    """背景執行緒定速轉動：主程式只用 set_direction(+1 / 0 / -1) 說「往這邊一直轉」。
+    不能在主迴圈直接呼叫 move_to()，它裡面會 sleep，鏡頭那邊的影格處理會整個卡住。
+    角度是用時間累積的 (速度 x 經過秒數)，所以實際轉速跟執行緒被排到的頻率無關。"""
+
+    def __init__(self, servo, speed=25.0, step_s=0.02, start=90.0,
+                 min_angle=0.0, max_angle=None):
+        self.servo = servo
+        self.speed, self.step_s = speed, step_s
+        self.min_angle = max(0.0, min_angle)
+        self.max_angle = servo.max_angle if max_angle is None else min(servo.max_angle, max_angle)
+        self.direction = 0
+        self._stop = threading.Event()
+        self._thread = None
+        if servo.angle is None:                 # 剛上電、不知道目前在哪：先平滑回到起始角度
+            servo.move_to(min(self.max_angle, max(self.min_angle, start)))
+        self.target = servo.angle
+
+    def start(self):
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        return self
+
+    def set_direction(self, d):
+        """+1 / -1 = 往那個方向持續轉，0 = 停在原地 (不是回中，是就地停住)"""
+        self.direction = 0 if not d else (1 if d > 0 else -1)
+
+    @property
+    def at_limit(self):
+        return self.target <= self.min_angle + 1e-6 or self.target >= self.max_angle - 1e-6
+
+    def _run(self):
+        last = time.monotonic()
+        while not self._stop.is_set():
+            time.sleep(self.step_s)
+            now = time.monotonic()
+            dt, last = now - last, now
+            d = self.direction
+            if d == 0:
+                continue
+            target = min(self.max_angle, max(self.min_angle, self.target + d * self.speed * dt))
+            if abs(target - self.target) < 1e-6:     # 頂到極限了，不用一直重寫 sysfs
+                continue
+            self.target = target
+            try:
+                self.servo.set_angle(target)
+            except OSError as e:                     # 寫不進去就別再試了，不然每 20 ms 噴一次
+                print(f"servo 寫入失敗，停止轉動: {e}")
+                self._stop.set()
+
+    def close(self):
+        """停下來；不關訊號，讓馬達繼續撐住鏡頭 (要放鬆請自己呼叫 servo.off())"""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=1.0)
 
 
 def main():

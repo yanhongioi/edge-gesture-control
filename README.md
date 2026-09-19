@@ -120,7 +120,8 @@ python3 hand_cam.py --mqtt 192.168.7.1 --mqtt-hz 30
 | `two`（食指 + 中指） | 捲動：**手指指向上 = 往上捲，指向下 = 往下捲**（橫的 = 暫停）。基本速度每秒約 3 格；手再往手指的方向推離起點（比出 `two` 那一刻的手掌高度）越遠，捲得越快。手或手勢短暫不見 0.5 秒以內，會用原本的速度繼續捲，起點不重算 |
 | `open` | 不動作（起手式：站遠時先張開手掌舉到臉旁邊，讓系統找到手） |
 | `fist` | **永遠不動作**（拿刀、拿鍋鏟時的手） |
-| 其他（`three`、`four`、`six`、`rock`、`ok`、`thumbs_up`） | 還沒對應，之後有需要再加 |
+| `ok`（中指 + 無名指 + 小指伸直，食指收起來） | **在板子上**切換雲台要不要跟著人轉（不經過 MQTT，PC 端不處理）。比一次切一次 |
+| 其他（`three`、`four`、`six`、`rock`、`thumbs_up`） | 還沒對應，之後有需要再加 |
 
 ```powershell
 py -3.11 .\pc\gesture_control.py --anchor tip         # 游標改跟食指尖（預設 pip 第一節關節；mcp = 食指根部，更穩）
@@ -135,7 +136,7 @@ py -3.11 .\pc\gesture_control.py --no-click           # 關掉捏合點擊，只
 py -3.11 .\pc\gesture_control.py --scroll-base 600    # 基本捲動速度快一點（預設 360 = 每秒 3 格）
 py -3.11 .\pc\gesture_control.py --scroll-gain 20000  # 推離起點時加速更多（預設 12000）；--scroll-invert 上下反過來
 py -3.11 .\pc\gesture_control.py --scroll-hold 1.0    # 掉幀時繼續捲久一點（預設 0.5 秒）
-py -3.11 .\pc\gesture_control.py --no-mirror          # 板子有加 --mirror 時要加
+py -3.11 .\pc\gesture_control.py --no-mirror          # 完全不要翻轉（正常不用，板子會自己說它翻過了）
 py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
 ```
 
@@ -157,7 +158,8 @@ py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
   - 濾波參數重新挑過，另外加了 6 px 的不動區。
   - 模擬測試（骨架點抖動約 ±11 px）：靜止時每秒閃動從約 21 次降到約 4 次；快速移動（1500 px/s）的落後從約 21 px 降到約 3 px。實際效果要上板確認。
 - **左鍵不會卡住**：手不見、換成其他手勢超過 0.3 秒、資料中斷、按 Ctrl+C，都會先放開。
-- **對應方式**：鏡頭畫面**中央 40%** 對應整個主螢幕，預設左右翻轉；程式會使用實際像素座標，Windows 縮放 125% / 150% 時也對得準。
+- **對應方式**：鏡頭畫面**中央 40%** 對應整個主螢幕；程式會使用實際像素座標，Windows 縮放 125% / 150% 時也對得準。
+- **左右翻轉**：板子預設就會翻轉畫面（像照鏡子），並在 MQTT 送出 `mirror` 欄位，PC 端看到就不會再翻第二次，不用自己加 `--no-mirror`。
 - **還沒做**：右鍵；裝上雲台後改用「手相對於人物框」的位置。
 
 ### 語音助理（板子 VIT 喚醒 → PC Whisper + 本地 LLM）
@@ -226,7 +228,7 @@ git push
 | `python3 hand_cam.py --display` | 在板子的 HDMI 螢幕 / 投影機上全螢幕顯示（`--windowed` = 小視窗；按 `q` 結束）。投影機要在**板子開機前**就打開並切到這個 HDMI 輸入，見下方已知問題 |
 | `python3 hand_cam.py --image test_images/hand-1.jpg` | 單張圖片測試，結果存到 `output/` |
 | `python3 hand_cam.py --delegate cpu` | 改用 CPU 跑（跟 NPU 比較，demo 用） |
-| `python3 hand_cam.py --mirror` | 畫面左右翻轉 |
+| `python3 hand_cam.py --no-mirror` | 關掉畫面左右翻轉（預設是翻轉的，像照鏡子） |
 | `python3 hand_cam.py --no-track` / `--no-person-search` / `--person-every 0` | 關掉手部追蹤 / 人物附近找手 / 人物偵測（比較用） |
 | `python3 hand_cam.py -h` | 所有參數 |
 
@@ -242,6 +244,8 @@ ping -c 1 pypi.org                     # 網址解析 (DNS) 正不正常
 v4l2-ctl --list-devices                # 鏡頭節點（C270 = /dev/video2）
 ls /dev/ethosu0                        # NPU 在不在
 python3 /root/edge-gesture-control/board/servo.py 90     # 雲台轉到 90 度（sweep = 掃一次；off = 放鬆）
+python3 /root/edge-gesture-control/board/hand_cam.py --servo   # 雲台追人（轉錯邊改 --servo-dir 1）
+python3 /root/edge-gesture-control/board/hand_cam.py --servo --servo-off  # 待命，比 ok 才開始追人
 arecord -l                             # 錄音裝置（C270 麥克風 = card WEBCAM）
 arecord -D plughw:CARD=WEBCAM,DEV=0 -f S16_LE -r 16000 -c 1 -d 5 -V mono /tmp/mic_test.wav   # 錄 5 秒測試
 python3 -m pip install <套件>          # 安裝 Python 套件（板子要能上網）
@@ -383,7 +387,7 @@ udhcpc -i mlan0
 
 ```text
 C270 640×480
- ├─ 人物偵測（每 5 幀一次）→ 挑最大的人 → 人物框、中心點、dx（之後給雲台用）
+ ├─ 人物偵測（每 10 幀一次）→ 挑最大的人 → 人物框、中心點、dx → 雲台（--servo）
  ├─ 手部追蹤（上一幀有手時）
  │    裁切框 = 上一幀骨架範圍 ×1.8 + 移動速度預測 → 骨架模型
  │    骨架分數 ≥ 0.55 → 繼續追；低於 0.55 → 算跟丟
@@ -421,7 +425,7 @@ C270 640×480
 **手部與人物辨識**（都已上板驗證，細節見下方調校紀錄）
 
 - [x] 修正 Vela 模型，三個模型都跑在 NPU 上
-- [x] 人物定位：每 5 幀一次，標出中心點和 `dx`
+- [x] 人物定位：每 10 幀一次，標出中心點和 `dx`
 - [x] 手部偵測：門檻 0.55（擋掉假框），一次最多試 2 個候選框
 - [x] 手部追蹤：找到手之後只跑骨架模型，追蹤中的門檻是 0.55
 - [x] 沒追到手時，偵測也會看人物附近，遠距離比較容易找到手
@@ -443,6 +447,8 @@ C270 640×480
 **之後再做**
 
 - [x] 伺服馬達 MG996R 可以用硬體 PWM 控制（pin 33 = `pwmchip1` channel 2），`board/servo.py`
+- [ ] 語音：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），**待上板測試**
+- [x] 雲台持續追人：`hand_cam.py --servo`（`PersonPanner` + `servo.Panner`），**待上板測試**。設計（2026-09-17 決定）：
 - [x] 語音喚醒詞：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），2026-09-19 上板實測：喚醒詞 10/10；經 MQTT `edge/voice` 送到筆電也測通（NEXT、PAUSE 都有對上編號，說不清楚的指令 = UNKNOWN）
 - [x] C270 麥克風共用：`asound.conf` 的 `c270`（dsnoop），AFE 和 `audio_stream.py --device c270` 可以同時跑（2026-09-19 上板實測）
 - [ ] 語音：VIT 喚醒 → MQTT `edge/voice` → `pc/voice_app.py --mqtt-wake` 只把下一句送 Whisper + 本地 LLM。流程已用模擬測過（真 MQTT + 假 Whisper / LLM），**待在有 NVIDIA 顯卡的電腦上實測**
@@ -451,6 +457,12 @@ C270 640×480
   - **手勢**：在這個穩定的畫面裡持續跑，不是兩種模式輪流切換。三個模型輪流使用 NPU，各自的 SRAM 都在 384 KB 以內，不會衝突。
   - **游標座標**：改用「手相對於人物框」的位置，不受鏡頭轉動影響。
   - 舵機使用獨立電源。
+  - **控制方式**：定速 bang-bang + 遲滯，不是比例控制。`dx` 超過 `--servo-deadband`（0.22）就往那邊用 `--servo-speed`（8 度/秒）一直轉，轉到 `dx` 小於 `--servo-hold`（0.12）才停。兩個門檻不同是為了不要在門檻附近抖。
+  - **更新頻率刻意壓低**：人物偵測每 `--person-every`（10）幀跑一次，30 fps 下約 3 Hz，少佔 NPU 給手勢那兩個模型。代價是中間 10 幀馬達在**盲轉**，所以轉速也一起降到 8 度/秒 —— 一次盲轉約 **2.7 度**，必須明顯小於 `--servo-hold` 對應的角度，否則馬達會跨過停止範圍、下次更新才發現要回頭修，看起來就是左右晃。啟動時會把這個數字印出來。
+  - **轉動在背景執行緒**（`servo.Panner`）：`servo.move_to()` 裡面會 sleep，直接在主迴圈呼叫會卡住影格。角度用「速度 × 經過秒數」累積，跟執行緒被排到的頻率無關。
+  - **方向**：`dx > 0` = 人在畫面右邊。角度要加還是要減**只由馬達怎麼裝決定** → `--servo-dir`（`-1` / `1`，預設 `-1`）。畫面翻轉造成的左右顛倒程式會先抵銷掉，所以**開不開鏡像不會改變馬達該往哪轉**，這兩件事互相獨立，調的時候不要一起動。
+  - 人不見或人物框太舊（超過 `--person-every` × 2 幀）就地停住，不亂轉去找人。
+  - **開關**：比一次 `ok` 手勢切換「要不要跟著人轉」（`--servo-toggle` 可換成別的手勢，空字串 = 關掉這功能）。只認手勢「第一次出現」那一下，一直比著不會連切；切換後 `--servo-toggle-cooldown`（1.5 秒）內不理會同一個手勢。關掉時馬達就地停住，不是回中。`--servo-off` = 開機先待命，比 `ok` 才開始追。
 
 ### 手部辨識調校紀錄（2026-09-17）
 
@@ -480,7 +492,7 @@ C270 640×480
 | --- | --- | --- |
 | 手部偵測 `hand_detect_20000_quant` | 約 10 ms | 只在沒追到手時跑 |
 | 手部骨架 `hand_landmark_new_256x256_integer_quant` | 約 9.6 ms | 每隻手每幀一次 |
-| 人物偵測 `detect_ssdmobilenetv3_quant` | 約 9.2 ms | 每 5 幀一次，平均每幀約 2 ms |
+| 人物偵測 `detect_ssdmobilenetv3_quant` | 約 9.2 ms | 預設每 10 幀一次，平均每幀約 **0.9 ms**（先前每 5 幀時約 2 ms）|
 | `hand_cam.py` 即時（640×480，1 隻手，含串流） | 約 32～35 FPS | 舊版每幀都跑手部偵測時約 28 FPS；C270 本身最高 30 fps |
 
 - CPU 對照：尚未量測，請用 setup.md 步驟 6 的 `benchmark_model` 量。
