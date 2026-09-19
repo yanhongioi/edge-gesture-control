@@ -114,6 +114,58 @@ free -m                                           # 記憶體
 
 量到新數字請更新這張表和 README 的「效能紀錄」。
 
-## 7. eIQ AI Hub 對照（雲端）
+## 7. demo 全開時的效能分析（`board/perf_monitor.py`）
+
+手勢、人物偵測、語音全部開著，照 demo 的方式操作，同時每秒記錄整台板子的狀態，結束時印出摘要。
+
+**① 照平常開好 demo**（順序見 README 指令區），唯一不同：`hand_cam.py` 要加 `-u` 並用 `tee` 存一份 log：
+
+```bash
+# 板子 SSH #1：手勢 (log 給 perf_monitor 讀 FPS 和推論時間)
+cd /root/edge-gesture-control/board
+python3 -u hand_cam.py --mqtt 192.168.7.1 --mqtt-hz 30 | tee /tmp/hand_cam.log
+# 板子 SSH #2：語音喚醒詞
+MIC_GAIN=13 MQTT_HOST=192.168.7.1 sh /root/edge-gesture-control/board/voice/run_voice.sh
+# 板子 SSH #3：聲音送 PC
+python3 /root/edge-gesture-control/board/audio_stream.py --device c270
+# PC：broker、gesture_control.py、voice_app.py --mqtt-wake (見 README)
+```
+
+**② 板子 SSH #4：開始量**（量測期間照 demo 腳本操作：移動游標、點擊、捲動、喊 Hey NXP 下指令）
+
+```bash
+cd /root/edge-gesture-control/board
+python3 perf_monitor.py -d 120 --csv /tmp/perf.csv      # 量 120 秒；Ctrl+C 可提早結束
+```
+
+**③ 看摘要**（例：2026-09-19，hand_cam `--port 0` + 語音 + audio_stream，沒有手在畫面上）
+
+```text
+項目                               平均       最低       最高
+CPU 整體 %                       64.9     59.3     97.7
+晶片溫度 °C                        50.7     49.9     51.4
+hand_cam FPS                   31.7     26.5     33.5
+NPU 每幀推論 ms (推算)           12.7     11.1     21.5
+NPU 忙碌 % (推算)                40.3     31.4     66.6
+
+程式                     CPU% 平均   CPU% 最高    記憶體 MB   (CPU% 以一顆核心 = 100%)
+hand_cam                  96.1     103.0     131.8
+VIT voice_ui_app           7.2       8.7       5.0
+AFE afe                    4.2       4.8       5.2
+audio_stream               0.4       1.9      12.9
+```
+
+| 欄位 | 怎麼解讀 |
+| --- | --- |
+| CPU 整體 % | 兩顆 Cortex-A55 的平均；長時間 > 90% 代表 CPU 是瓶頸 |
+| 程式 CPU% | 以一顆核心 = 100%，所以最高可到 200%。hand_cam 約一整顆：讀鏡頭、轉色彩、縮放、畫圖、JPEG 串流都在 Python / CPU |
+| NPU 忙碌 %（推算） | FPS × 每幀推論 ms / 1000。i.MX93 的 NPU 由 Cortex-M33 透過 rpmsg 驅動，系統沒有 NPU 使用率計數，只能用 `hand_cam.py` 印出的推論時間推算 |
+| usb0 送 KB/s | 板子 → PC：MQTT (手勢資料) + 聲音 (約 32 KB/s) + MJPEG 串流 |
+| 晶片溫度 | 這塊板子的保護門檻：115°C 開始降頻（passive）、125°C 強制關機（critical）；平常 50°C 左右 |
+
+- `/tmp/perf.csv` 是每秒的原始數據，可以 `scp root@192.168.7.2:/tmp/perf.csv .` 拿回 PC 用 Excel 畫圖。
+- PC 端（Whisper / LLM）不在這裡量：看 `voice_app.py` 印的 `[辨識 x.xxxs]`（語音轉文字時間），GPU / CPU 用 Windows 工作管理員的「效能」分頁。
+
+## 8. eIQ AI Hub 對照（雲端）
 
 <https://eiq.nxp.com/ai-hub/dashboard> 的 **Benchmark → Latency**：選模型 → 裝置 **i.MX 93** → BSP 版本 → 後端 CPU 或 NPU → 送出，到 **Task List** 看結果。可以跟第 6 節的實測對照。

@@ -22,6 +22,7 @@ edge-gesture-control/
 │   ├── servo.py              # MG996R 伺服馬達（雲台）：pin 33 硬體 PWM，用角度控制
 │   ├── voice/                # 語音喚醒：NXP AFE + VIT「Hey NXP」（C270 麥克風），結果送 MQTT edge/voice
 │   ├── audio_stream.py       # 麥克風聲音用 TCP 8765 一直送到 PC（給 pc/voice_app.py）
+│   ├── perf_monitor.py       # demo 全開時的效能監測：CPU、各程式、溫度、網路、FPS、NPU 忙碌比例（docs/benchmark.md 第 7 節）
 │   ├── usb_net.sh            # 把 USB1_C 設成 USB 網卡，讓筆電直連 (192.168.7.2)
 │   ├── models/               # 手部、人物模型（原始 + Vela 編譯版 + Vela 報告）
 │   └── test_images/          # 單張圖片測試用（張開手掌、握拳、指東西）
@@ -244,6 +245,7 @@ v4l2-ctl --list-devices                # 鏡頭節點（C270 = /dev/video2）
 ls /dev/ethosu0                        # NPU 在不在
 python3 /root/edge-gesture-control/board/servo.py 90     # 雲台轉到 90 度（sweep = 掃一次；off = 放鬆）
 arecord -l                             # 錄音裝置（C270 麥克風 = card WEBCAM）
+python3 /root/edge-gesture-control/board/perf_monitor.py -d 120   # demo 全開時量 120 秒效能（hand_cam 要 | tee /tmp/hand_cam.log，見 docs/benchmark.md）
 arecord -D plughw:CARD=WEBCAM,DEV=0 -f S16_LE -r 16000 -c 1 -d 5 -V mono /tmp/mic_test.wav   # 錄 5 秒測試
 python3 -m pip install <套件>          # 安裝 Python 套件（板子要能上網）
 reboot / poweroff                      # 重開機 / 關機
