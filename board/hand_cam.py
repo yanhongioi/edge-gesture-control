@@ -19,7 +19,6 @@
 #   python3 hand_cam.py --delegate cpu           # 用 CPU 跑 (跟 NPU 對照)
 #   python3 hand_cam.py --mqtt 192.168.7.1       # 21 點座標送到 PC, topic: edge/hand
 #   python3 hand_cam.py --person-every 10        # 人物偵測每 10 幀跑一次 (0 = 關閉)
-#   python3 hand_cam.py --pan                    # 雲台追人：MG996R (pin 33) 轉動，讓人留在畫面中央
 #   python3 hand_cam.py --image test_images/hand-1.jpg  # 單張圖片測試，結果存到 output/
 # --------------------------------------------------------------------------------------
 
@@ -637,21 +636,6 @@ def main():
     ap.add_argument("--verbose", action="store_true", help="每幀印出推論時間")
     ap.add_argument("--debug", action="store_true",
                     help="畫出除錯用的框：被骨架模型否決的偵測框 (紅)、在人物附近找手的範圍 (紫)")
-    pan = ap.add_argument_group("雲台追人 (--pan，見 pan_tracker.py)")
-    pan.add_argument("--pan", action="store_true", help="伺服馬達水平轉動，讓人留在畫面中央")
-    pan.add_argument("--pan-invert", action="store_true", help="馬達轉反了 (人在右邊卻往左轉) 就加這個")
-    pan.add_argument("--pan-min", type=float, default=20, help="最小角度 (絕對極限)")
-    pan.add_argument("--pan-max", type=float, default=160, help="最大角度 (絕對極限)")
-    pan.add_argument("--pan-home", type=float, default=90, help="起始 / 回歸角度")
-    pan.add_argument("--pan-home-after", type=float, default=0, help="人不見幾秒後回到 home，0 = 停在原地")
-    pan.add_argument("--pan-speed", type=float, default=90, help="最高轉速 (度/秒)")
-    pan.add_argument("--pan-accel", type=float, default=300, help="加減速 (度/秒^2)，越小起停越柔")
-    pan.add_argument("--pan-gain", type=float, default=0.6, help="每次量測修正誤差的幾成 (0~1)")
-    pan.add_argument("--pan-dead", type=float, default=0.15, help="人偏離中央超過多少 (dx) 才開始轉")
-    pan.add_argument("--pan-fov", type=float, default=45, help="鏡頭水平視角 (度)，C270 約 45")
-    pan.add_argument("--pan-no-freeze", action="store_true", help="用手勢操作 (point/two) 時也照樣轉")
-    pan.add_argument("--servo-min-us", type=int, default=500, help="伺服 0 度的脈衝寬度 (us)")
-    pan.add_argument("--servo-max-us", type=int, default=2500, help="伺服 180 度的脈衝寬度 (us)")
     args = ap.parse_args()
 
     det_path, lmk_path, per_path = args.model, args.model_landmark, args.model_person
@@ -671,8 +655,6 @@ def main():
     if args.person_every > 0:
         person = PersonLocator(SsdDetector(per_path, args.delegate, "person detect"),
                                args.person_every, args.person_thresh)
-    if args.pan and (person is None or args.image):
-        sys.exit("--pan 需要人物偵測 (--person-every > 0) 和鏡頭")
 
     # 單張圖片測試
     if args.image:
@@ -702,17 +684,6 @@ def main():
     streamer = (MjpegStreamer(args.port, args.stream_scale, args.stream_quality, args.stream_fps)
                 if args.port else None)
     mqtt_pub = MqttPublisher(args.mqtt, args.mqtt_topic, args.mqtt_hz) if args.mqtt else None
-    pan = None
-    if args.pan:
-        from servo import Servo                  # 只有 --pan 才需要 (板子要有 servo.py / pan_tracker.py)
-        from pan_tracker import PanTracker
-        pan = PanTracker(Servo(min_us=args.servo_min_us, max_us=args.servo_max_us),
-                         fov=args.pan_fov, gain=args.pan_gain, dead_start=args.pan_dead,
-                         min_angle=args.pan_min, max_angle=args.pan_max, home=args.pan_home,
-                         max_speed=args.pan_speed, accel=args.pan_accel, invert=args.pan_invert,
-                         home_after=args.pan_home_after)
-        pan.target = pan._clamp(args.pan_home)
-        print(f"雲台：{pan.angle:.0f} 度 → home {pan.target:.0f} 度，範圍 {args.pan_min:.0f}~{args.pan_max:.0f}")
     if args.display and not setup_wayland():
         args.display = False
     if args.display:
@@ -740,19 +711,9 @@ def main():
                 continue
             if args.mirror:
                 frame = cv2.flip(frame, 1)
-            cap_angle = pan.capture_angle() if pan else None     # 這一幀拍下時雲台的角度
 
             hands, person_info, (det_ms, lmk_ms, per_ms) = process(frame, detector, landmark,
                                                                     person, tracker, args)
-            if pan:
-                dx = None
-                if person_info:
-                    dx = -person_info["dx"] if args.mirror else person_info["dx"]   # 鏡像時左右相反
-                fresh = bool(person_info) and person_info["age"] == 0         # 這一幀剛偵測到
-                freeze = (not args.pan_no_freeze and
-                          any(h["gesture"] in ("point", "two") for h in hands))
-                pan.update(dx, fresh, cap_angle, freeze)
-                pan.draw(frame)
 
             n_frames += 1
             n_tries += len(STATE.last_presences)
@@ -776,8 +737,7 @@ def main():
             if mqtt_pub:
                 mqtt_pub.publish({"ts": time.time(), "fps": round(fps, 1),
                                   "width": frame.shape[1], "height": frame.shape[0],
-                                  "hands": hands, "person": person_info,
-                                  "pan": pan.as_dict() if pan else None})
+                                  "hands": hands, "person": person_info})
             if args.display:
                 cv2.imshow(WINDOW_NAME, frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -794,8 +754,6 @@ def main():
         pass
     finally:
         print("結束")
-        if pan:
-            pan.close()
         cap.release()
         if args.display:
             cv2.destroyAllWindows()
