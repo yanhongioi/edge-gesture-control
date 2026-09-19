@@ -22,15 +22,85 @@ class ValidatePlanTests(unittest.TestCase):
         self.assertEqual(plan.actions[0].tool, "open_url")
 
     def test_search_and_music_queries(self) -> None:
-        for tool in ("search_web", "play_music"):
+        arguments_by_tool = {
+            "search_web": {"query": "晴天 周杰倫", "open_first_result": False},
+            "play_music": {"query": "晴天 周杰倫", "selection": "track"},
+        }
+        for tool, arguments in arguments_by_tool.items():
             plan = validate_plan(
                 {
                     "intent": "action",
                     "reply": "準備執行。",
-                    "actions": [{"tool": tool, "arguments": {"query": "晴天 周杰倫"}}],
+                    "actions": [{"tool": tool, "arguments": arguments}],
                 }
             )
             self.assertEqual(plan.actions[0].tool, tool)
+
+    def test_valid_playback_control(self) -> None:
+        for operation in ("play", "pause"):
+            plan = validate_plan(
+                {
+                    "intent": "action",
+                    "reply": "是的，主人。",
+                    "actions": [
+                        {
+                            "tool": "control_playback",
+                            "arguments": {"operation": operation},
+                        }
+                    ],
+                }
+            )
+            self.assertEqual(plan.actions[0].arguments["operation"], operation)
+
+    def test_invalid_playback_control_is_rejected(self) -> None:
+        with self.assertRaises(PlanValidationError):
+            validate_plan(
+                {
+                    "intent": "action",
+                    "reply": "錯誤。",
+                    "actions": [
+                        {
+                            "tool": "control_playback",
+                            "arguments": {"operation": "toggle"},
+                        }
+                    ],
+                }
+            )
+
+    def test_valid_volume_actions(self) -> None:
+        cases = (
+            ("adjust_volume", {"steps": -3}),
+            ("set_volume", {"level": 75}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(tool=tool):
+                plan = validate_plan(
+                    {
+                        "intent": "action",
+                        "reply": "是的，主人。",
+                        "actions": [{"tool": tool, "arguments": arguments}],
+                    }
+                )
+                self.assertEqual(plan.actions[0].arguments, arguments)
+
+    def test_invalid_volume_actions_are_rejected(self) -> None:
+        cases = (
+            ("adjust_volume", {"steps": 0}),
+            ("adjust_volume", {"steps": 11}),
+            ("set_volume", {"level": -1}),
+            ("set_volume", {"level": 101}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(tool=tool, arguments=arguments), self.assertRaises(
+                PlanValidationError
+            ):
+                validate_plan(
+                    {
+                        "intent": "action",
+                        "reply": "錯誤。",
+                        "actions": [{"tool": tool, "arguments": arguments}],
+                    }
+                )
 
     def test_empty_query_is_rejected(self) -> None:
         with self.assertRaises(PlanValidationError):
@@ -38,7 +108,96 @@ class ValidatePlanTests(unittest.TestCase):
                 {
                     "intent": "action",
                     "reply": "錯誤。",
-                    "actions": [{"tool": "play_music", "arguments": {"query": " "}}],
+                    "actions": [
+                        {
+                            "tool": "play_music",
+                            "arguments": {"query": " ", "selection": "track"},
+                        }
+                    ],
+                }
+            )
+
+    def test_invalid_music_selection_is_rejected(self) -> None:
+        with self.assertRaises(PlanValidationError):
+            validate_plan(
+                {
+                    "intent": "action",
+                    "reply": "錯誤。",
+                    "actions": [
+                        {
+                            "tool": "play_music",
+                            "arguments": {"query": "韓文歌", "selection": "random"},
+                        }
+                    ],
+                }
+            )
+
+    def test_search_first_result_flag_must_be_boolean(self) -> None:
+        with self.assertRaises(PlanValidationError):
+            validate_plan(
+                {
+                    "intent": "action",
+                    "reply": "錯誤。",
+                    "actions": [
+                        {
+                            "tool": "search_web",
+                            "arguments": {
+                                "query": "雞胸肉食譜",
+                                "open_first_result": "false",
+                            },
+                        }
+                    ],
+                }
+            )
+
+    def test_valid_timer(self) -> None:
+        plan = validate_plan(
+            {
+                "intent": "action",
+                "reply": "開始計時。",
+                "actions": [
+                    {
+                        "tool": "set_timer",
+                        "arguments": {"seconds": 300, "label": "煮蛋"},
+                    }
+                ],
+            }
+        )
+        self.assertEqual(plan.actions[0].arguments["seconds"], 300)
+
+    def test_invalid_timer_duration_is_rejected(self) -> None:
+        for seconds in (0, 86_401, True):
+            with self.subTest(seconds=seconds), self.assertRaises(PlanValidationError):
+                validate_plan(
+                    {
+                        "intent": "action",
+                        "reply": "錯誤。",
+                        "actions": [
+                            {
+                                "tool": "set_timer",
+                                "arguments": {"seconds": seconds, "label": "計時器"},
+                            }
+                        ],
+                    }
+                )
+
+    def test_cancel_timer_requires_empty_arguments(self) -> None:
+        plan = validate_plan(
+            {
+                "intent": "action",
+                "reply": "取消計時。",
+                "actions": [{"tool": "cancel_timer", "arguments": {}}],
+            }
+        )
+        self.assertEqual(plan.actions[0].arguments, {})
+        with self.assertRaises(PlanValidationError):
+            validate_plan(
+                {
+                    "intent": "action",
+                    "reply": "取消計時。",
+                    "actions": [
+                        {"tool": "cancel_timer", "arguments": {"all": True}}
+                    ],
                 }
             )
 

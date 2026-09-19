@@ -4,13 +4,16 @@
 # 改寫自 MobileNetSSD_HandAndSKeletonDetect/app.py (WPI, Weilly Li, Apache-2.0)，修正/新增：
 #   * 預設用 i.MX93 的 NPU (Ethos-U, libethosu_delegate.so)，app.py 預設的 vx 是 i.MX8MP 用的
 #   * 自動尋找 C270 的 /dev/videoX，不再寫死 /dev/video3
+#   * 畫面預設左右翻轉 (像照鏡子)，--no-mirror 關掉；MQTT 會送出 mirror 讓 PC 端知道
 #   * 鏡頭畫面轉 RGB 再送進模型 (OpenCV 讀進來是 BGR)
 #   * 內建 HTTP MJPEG 串流 -> 筆電瀏覽器開 http://<板子IP>:8080 就能看到畫面+骨架
 #   * 可選：板子 HDMI 螢幕顯示 (--display)、MQTT 送出 21 點座標 (--mqtt)
 #   * 手部追蹤：找到手之後用上一幀的骨架範圍當裁切框，只跑骨架模型；跟丟才跑手部偵測
 #   * 找手時，一幀看全畫面、一幀只看人物上半身附近 (遠距離時手在偵測模型裡會變大)
 #   * 人物定位：每 N 幀跑一次人物偵測 (MobileNetSSD_VehicleHumanDetector)，標出人的中心點
-#     和偏離畫面中央的量 dx，給之後的雲台用
+#     和偏離畫面中央的量 dx
+#   * 雲台追人 (--servo)：dx 偏離中央超過死區就用固定轉速轉馬達，把人拉回畫面中央
+#     比一次 ok 手勢 = 開 / 關「跟著人轉」(--servo-toggle 可換手勢)
 #
 # 用法 (在板子上):
 #   python3 hand_cam.py                          # NPU + 串流到 :8080
@@ -18,7 +21,11 @@
 #   python3 hand_cam.py --stream-scale 0.5 --stream-fps 10   # 網路慢時減輕串流
 #   python3 hand_cam.py --delegate cpu           # 用 CPU 跑 (跟 NPU 對照)
 #   python3 hand_cam.py --mqtt 192.168.7.1       # 21 點座標送到 PC, topic: edge/hand
-#   python3 hand_cam.py --person-every 10        # 人物偵測每 10 幀跑一次 (0 = 關閉)
+#   python3 hand_cam.py --person-every 5         # 人物偵測更頻繁 (預設 10；0 = 關閉，但雲台會不能用)
+#   python3 hand_cam.py --servo                  # 雲台追人：把人的框維持在畫面中央
+#   python3 hand_cam.py --servo --servo-dir 1    # 轉錯邊時換方向 (方向看馬達怎麼裝)
+#   python3 hand_cam.py --servo --servo-speed 4  # 還是會左右晃的話再轉慢一點
+#   python3 hand_cam.py --servo --servo-off      # 雲台待命，比 ok 才開始追人
 #   python3 hand_cam.py --image test_images/hand-1.jpg  # 單張圖片測試，結果存到 output/
 # --------------------------------------------------------------------------------------
 
@@ -37,6 +44,7 @@ import cv2
 import numpy as np
 
 import gesture
+import servo
 
 try:
     import tflite_runtime.interpreter as tflite          # 板子 (NXP BSP)
@@ -205,7 +213,7 @@ PERSON_CLASS = 0      # COCO label: 0 = person
 class PersonLocator:
     """每 N 幀跑一次人物偵測，記住畫面中最大的人 (通常就是使用者)。
     dx / dy = 人物中心偏離畫面中央的量，-1~+1，正值 = 人在畫面右 / 下方。
-    之後的雲台就是要把 dx 拉回 0。注意：用 --mirror 時畫面已左右翻轉，雲台方向要跟著反過來。"""
+    之後的雲台就是要把 dx 拉回 0。注意：畫面翻轉時 dx 的左右跟真實世界相反 (PersonPanner 會補償)。"""
 
     def __init__(self, detector, every, thresh):
         self.detector, self.every, self.thresh = detector, max(1, every), thresh
@@ -290,6 +298,75 @@ class PersonLocator:
                 "box": [round(x0 / fw, 4), round(y0 / fh, 4), round(x1 / fw, 4), round(y1 / fh, 4)],
                 "center": [round(cx / fw, 4), round(cy / fh, 4)],
                 "dx": round(dx, 4), "dy": round(dy, 4), "age": self.age}
+
+
+class GestureToggle:
+    """用手勢切換開關：手勢「第一次出現」才切一次 (rising edge)，一直比著不會連續切。
+    cooldown 是防止辨識閃一下 (ok → 別的 → ok) 就連切兩次；板子上的 GestureSmoother 已經要求
+    連續 4 幀一致才確認，這裡再加一層時間保險。"""
+
+    def __init__(self, name, state=True, cooldown=1.5):
+        self.name, self.state, self.cooldown = name, state, cooldown
+        self.seen = False           # 上一幀是不是這個手勢
+        self.last = float("-inf")   # 上次切換的時間；-inf 讓第一次切換不會被 cooldown 擋掉
+
+    def update(self, gesture, t):
+        """回傳 (目前狀態, 這一幀有沒有切換)"""
+        seen, toggled = gesture == self.name, False
+        if seen and not self.seen and t - self.last > self.cooldown:
+            self.state, self.last, toggled = not self.state, t, True
+        self.seen = seen
+        return self.state, toggled
+
+
+class PersonPanner:
+    """雲台追人：讓人的 bounding box 一直留在畫面中央。
+    人偏離中央超過 deadband 就往那邊「定速」轉 (不是比例控制，就是固定轉速一直轉)，
+    轉到偏移小於 hold 才停。兩個門檻是遲滯：只用一個門檻的話，停下來那一刻偏移剛好在門檻上，
+    下一幀又會再轉，鏡頭會一直左右抖。
+
+    為什麼 hold 不能設太小、速度不能設太快：人物偵測每 --person-every 幀才跑一次 (預設 10，
+    30 fps 下約 3 Hz)，中間那 10 幀馬達是「盲轉」的 —— 看到的 dx 是 300 多毫秒前的。
+    盲轉一次的距離 (速度 x 更新間隔) 必須明顯小於 hold 對應的角度，不然馬達會直接跨過停止範圍，
+    下次更新才發現過頭了要回頭修，看起來就是左右來回晃。預設 8 度/秒 x 0.33 秒 = 一次約 2.7 度。
+    人不見了 (或 box 太舊) 就地停住，不要亂轉去找。"""
+
+    def __init__(self, panner, deadband=0.15, hold=0.05, dir_sign=-1, mirror=False,
+                 toggle="ok", enabled=True):
+        self.panner, self.deadband, self.hold = panner, deadband, max(0.0, hold)
+        self.toggle = GestureToggle(toggle, enabled)      # 比 ok 開 / 關「跟著人轉」
+        # dx > 0 = 人在畫面右邊 → 鏡頭要往右轉。角度要加還是要減，看馬達怎麼裝 → --servo-dir。
+        # 畫面翻轉時 dx 的左右跟真實世界相反，先抵銷掉；抵銷後剩下的就只有馬達安裝方向，
+        # 所以開不開鏡像不會改變馬達該往哪轉 (兩件事互相獨立)。
+        self.sign = dir_sign * (-1 if mirror else 1)
+        self.moving = 0             # 目前正往哪邊轉 (遲滯要用)
+
+    def update(self, person_info, max_age, gesture, t):
+        """person_info = PersonLocator.as_dict() 的結果 (沒看到人時是 None)；
+        gesture = 這一幀確認過的手勢 (拿來當開關)。關掉時馬達就地停住，不是回中。"""
+        on, toggled = self.toggle.update(gesture, t)
+        if toggled:
+            print(f"  {'[O] 雲台追人：開' if on else '[X] 雲台追人：關'}（手勢 {self.toggle.name}）")
+        if not on or person_info is None or person_info["age"] > max_age:
+            self.moving = 0                                  # 關掉 / 沒人 / 資料太舊：停住
+        else:
+            dx = person_info["dx"]
+            threshold = self.hold if self.moving else self.deadband   # 轉動中用較小的門檻
+            self.moving = 0 if abs(dx) < threshold else (1 if dx > 0 else -1)
+        self.panner.set_direction(self.moving * self.sign)
+        return self.moving
+
+    def close(self):
+        """停止轉動；馬達保持出力撐住鏡頭 (要放鬆請自己呼叫 servo 的 off())"""
+        self.panner.set_direction(0)
+        self.panner.close()
+
+    def status(self):
+        if not self.toggle.state:
+            return f"pan {self.panner.target:3.0f} OFF"
+        arrow = {1: ">>", -1: "<<", 0: "--"}[self.moving]
+        limit = " LIMIT" if self.panner.at_limit else ""
+        return f"pan {self.panner.target:3.0f} {arrow}{limit}"
 
 
 # --------------------------------------------------------------------------------------
@@ -622,13 +699,15 @@ def main():
     ap.add_argument("--model-landmark",
                     default=os.path.join(HERE, "models/hand_landmark_new_256x256_integer_quant.tflite"))
     ap.add_argument("--model-person", default=os.path.join(HERE, "models/detect_ssdmobilenetv3_quant.tflite"))
-    ap.add_argument("--person-every", type=int, default=5, help="人物偵測每幾幀跑一次，0 = 關閉")
+    ap.add_argument("--person-every", type=int, default=10,
+                    help="人物偵測每幾幀跑一次，0 = 關閉。調小會更即時，但 NPU 要分更多時間給它，手勢那邊的 FPS 會掉")
     ap.add_argument("--person-thresh", type=float, default=0.5, help="人物偵測分數門檻")
     ap.add_argument("--device", default="", help="例如 /dev/video2；不給就自動找 C270")
     ap.add_argument("--width", type=int, default=640)
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--fps", type=int, default=30)
-    ap.add_argument("--mirror", action="store_true", help="左右翻轉畫面 (像照鏡子)")
+    ap.add_argument("--no-mirror", action="store_true",
+                    help="不要左右翻轉畫面 (預設是翻轉的，看起來像照鏡子；手勢判斷不受影響)")
     ap.add_argument("--det-thresh", type=float, default=0.55,
                     help="hand detection score threshold (the model outputs junk boxes at exactly 0.50 when there is no hand)")
     ap.add_argument("--lmk-thresh", type=float, default=0.7, help="手骨信心分數門檻")
@@ -650,11 +729,40 @@ def main():
     ap.add_argument("--mqtt", default="", help="MQTT broker IP，例如 192.168.10.1")
     ap.add_argument("--mqtt-topic", default="edge/hand")
     ap.add_argument("--mqtt-hz", type=float, default=15)
+    g = ap.add_argument_group("雲台 (servo，把人維持在畫面中央)")
+    g.add_argument("--servo", action="store_true", help="開啟雲台追人 (需要 servo.py 的硬體 PWM)")
+    g.add_argument("--servo-speed", type=float, default=8.0,
+                   help="轉速 (度/秒)。兩次人物偵測之間馬達是盲轉的，轉太快會直接衝過停止門檻，"
+                        "然後要回頭修正，看起來就是左右晃")
+    g.add_argument("--servo-deadband", type=float, default=0.22,
+                   help="人偏離畫面中央超過這個量 (0~1) 才開始轉")
+    g.add_argument("--servo-hold", type=float, default=0.12,
+                   help="轉到偏移小於這個量才停 (要比 --servo-deadband 小，這是遲滯)。"
+                        "要比「一次盲轉的距離」大，不然停不進這個範圍裡，會一直來回過頭")
+    g.add_argument("--servo-dir", type=int, choices=(1, -1), default=-1,
+                   help="轉動方向：馬達怎麼裝決定的。轉錯邊就換成另一個值 (1 / -1)")
+    g.add_argument("--servo-toggle", default="ok",
+                   help="用哪個手勢開 / 關「跟著人轉」(比一次切換一次；空字串 = 不用手勢控制)")
+    g.add_argument("--servo-toggle-cooldown", type=float, default=1.5,
+                   help="切換後幾秒內不理會同一個手勢 (避免辨識閃爍時連切兩次)")
+    g.add_argument("--servo-off", action="store_true",
+                   help="一開始不要跟著人轉 (等比 --servo-toggle 手勢才開始)")
+    g.add_argument("--servo-start", type=float, default=90.0, help="開機時的起始角度")
+    g.add_argument("--servo-min", type=float, default=10.0, help="可轉範圍下限 (度)")
+    g.add_argument("--servo-max", type=float, default=170.0, help="可轉範圍上限 (度)")
+    g.add_argument("--servo-chip", type=int, default=1)
+    g.add_argument("--servo-channel", type=int, default=2)
+    g.add_argument("--servo-min-us", type=int, default=500, help="0 度的脈衝寬度 (校準用，見 servo.py)")
+    g.add_argument("--servo-max-us", type=int, default=2500, help="180 度的脈衝寬度 (校準用)")
     ap.add_argument("--image", default="", help="單張圖片測試模式")
     ap.add_argument("--verbose", action="store_true", help="每幀印出推論時間")
     ap.add_argument("--debug", action="store_true",
                     help="畫出除錯用的框：被骨架模型否決的偵測框 (紅)、在人物附近找手的範圍 (紫)")
     args = ap.parse_args()
+    # 預設翻轉：人看著自己的畫面，手往右移畫面裡也要往右，不然很難操作。
+    # 翻轉在讀進影格後、所有處理之前，所以骨架座標和 dx 都是翻過的；PersonPanner 會補償，
+    # MQTT 也會送出 mirror 讓 PC 端知道不要再翻一次。
+    args.mirror = not args.no_mirror
 
     det_path, lmk_path, per_path = args.model, args.model_landmark, args.model_person
     if args.delegate == "npu":
@@ -691,6 +799,32 @@ def main():
         for h in hands:
             print(json.dumps(h))
         return
+
+    panner = None
+    if args.servo:
+        if person is None:
+            sys.exit("--servo 需要人物偵測，--person-every 不能是 0")
+        try:
+            motor = servo.Servo(args.servo_chip, args.servo_channel,
+                                args.servo_min_us, args.servo_max_us)
+            panner = PersonPanner(
+                servo.Panner(motor, args.servo_speed, start=args.servo_start,
+                             min_angle=args.servo_min, max_angle=args.servo_max).start(),
+                args.servo_deadband, args.servo_hold, args.servo_dir, args.mirror,
+                args.servo_toggle, not args.servo_off)
+            panner.toggle.cooldown = args.servo_toggle_cooldown
+            blind = args.servo_speed * args.person_every / max(1, args.fps)
+            print(f"雲台啟動：{args.servo_speed:.0f} 度/秒，範圍 {args.servo_min:.0f}~{args.servo_max:.0f} 度，"
+                  f"人物偵測每 {args.person_every} 幀 (約 {args.person_every / max(1, args.fps) * 1000:.0f} ms) "
+                  f"更新一次 → 每次盲轉約 {blind:.1f} 度，"
+                  f"死區 {args.servo_deadband:.2f} / 停止 {args.servo_hold:.2f}"
+                  f"，方向 {args.servo_dir:+d}"
+                  f"{f'；手勢 {args.servo_toggle} = 開 / 關' if args.servo_toggle else ''}"
+                  f"{'，目前是關的' if args.servo_off else ''}")
+        except OSError as e:          # 不在板子上 / 沒權限：其他功能照跑，不要整個掛掉
+            print(f"雲台開不起來 (繼續跑，不控制馬達): {e}")
+            panner = None
+
 
     dev = args.device or find_camera()
     if not dev:
@@ -732,6 +866,9 @@ def main():
 
             hands, person_info, (det_ms, lmk_ms, per_ms) = process(frame, detector, landmark,
                                                                     person, tracker, args)
+            if panner is not None:
+                g = hands[0].get("gesture") if hands else None
+                panner.update(person_info, person.every * 2, g, time.monotonic())
 
             n_frames += 1
             n_tries += len(STATE.last_presences)
@@ -747,6 +884,8 @@ def main():
             info = f"{args.delegate.upper()}  FPS {fps:4.1f}  det {det_ms:4.1f}  lmk {lmk_ms:4.1f}"
             if person is not None:
                 info += f"  per {person.ms:4.1f}/{person.every}f"
+            if panner is not None:
+                info += "  " + panner.status()
             cv2.putText(frame, info, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3)
             cv2.putText(frame, info, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 1)
 
@@ -755,6 +894,7 @@ def main():
             if mqtt_pub:
                 mqtt_pub.publish({"ts": time.time(), "fps": round(fps, 1),
                                   "width": frame.shape[1], "height": frame.shape[0],
+                                  "mirror": args.mirror,     # 座標是不是已經左右翻轉過 (PC 端別再翻一次)
                                   "hands": hands, "person": person_info})
             if args.display:
                 cv2.imshow(WINDOW_NAME, frame)
@@ -772,6 +912,8 @@ def main():
         pass
     finally:
         print("結束")
+        if panner is not None:
+            panner.close()
         cap.release()
         if args.display:
             cv2.destroyAllWindows()

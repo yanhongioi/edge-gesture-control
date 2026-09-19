@@ -176,6 +176,7 @@ class CursorController:
         self.lock_since = 0.0
         self.moves = 0
         self.last_print = 0.0
+        self.board_mirror = False   # 板子送來的座標是不是已經左右翻轉過 (見 on_message)
 
     # ---- 輸出 --------------------------------------------------------------------------
     def _set(self, x, y, t):
@@ -277,8 +278,10 @@ class CursorController:
 
         # 跟著食指 (預設指尖) 移動 (One Euro 濾波 + 不動區)
         tip = hand["landmarks"][ANCHORS[a.anchor]]
+        # 板子已經翻過就不能再翻一次，不然游標左右會反過來
+        mirror = not a.no_mirror and not self.board_mirror
         x, y = map_to_screen(tip[0], tip[1], self.sw, self.sh, a.region, (a.center_x, a.center_y),
-                             not a.no_mirror)
+                             mirror)
         if self.hold_until:                               # 剛從停頓恢復
             self._restart_filter(t)
             self.hold_until = 0.0
@@ -488,7 +491,9 @@ def main():
                    help="鏡頭畫面中央多大比例的範圍對應到整個螢幕 (越小，手移動越少)")
     g.add_argument("--center-x", type=float, default=0.5, help="對應範圍的中心 x (0~1，鏡頭畫面座標)")
     g.add_argument("--center-y", type=float, default=0.5, help="對應範圍的中心 y (0~1)")
-    g.add_argument("--no-mirror", action="store_true", help="板子有加 --mirror 時請加這個")
+    g.add_argument("--no-mirror", action="store_true",
+                   help="完全不要左右翻轉。板子本來就會送 mirror 欄位說它翻過了，"
+                        "正常情況不需要這個 (舊版板子沒有這個欄位時才用得到)")
     g.add_argument("--min-cutoff", type=float, default=0.5, help="濾波：越小越穩、越黏 (預設 0.5)")
     g.add_argument("--beta", type=float, default=0.05, help="濾波：越大，快速移動時越跟手 (預設 0.05)")
     g.add_argument("--d-cutoff", type=float, default=0.3, help="濾波：速度估計的平滑度 (預設 0.3)")
@@ -564,6 +569,7 @@ def main():
         hand = hands[0] if hands else None
         now = time.monotonic()
         with lock:
+            cursor.board_mirror = bool(data.get("mirror"))    # 板子 >= 2026-09-19 版才有這個欄位
             cursor.update(hand, now)
             if cursor.state == "idle":
                 scroll.update(hand, now)
@@ -594,7 +600,7 @@ def main():
               f"（+pinch = 比該手勢並捏合；觸發後要先回到中立姿勢"
               f"「手掌張開沒捏 / 握拳 / 手收起來」才能再觸發一次）")
     print(f"螢幕 {screen[0]}x{screen[1]}，鏡頭畫面中央 {args.region:.0%} 對應整個螢幕"
-          f"{'，左右翻轉' if not args.no_mirror else ''}。Ctrl+C 結束。")
+          f"{'，左右翻轉 (板子已翻轉的話自動不重複翻)' if not args.no_mirror else ''}。Ctrl+C 結束。")
 
     tick, pending, last = 0.02, 0.0, time.monotonic()
     try:

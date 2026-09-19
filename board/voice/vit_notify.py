@@ -6,7 +6,7 @@
 # 這裡把結果送到 MQTT topic edge/voice (broker = 環境變數 MQTT_HOST，預設 192.168.7.1)
 #
 # 編號對應 /unit_tests/nxp-afe/voice_ui_app 內建的 VIT 模型 (啟動時會印出清單)。
-# 假設編號從 1 開始、依清單順序；訊息裡同時附上原始編號，實測對不上再改下面兩個表。
+# 編號從 1 開始、依清單順序 (2026-09-19 上板實測：HEY NXP = 1、NEXT = 2)；0 = 沒聽懂的指令 (UNKNOWN)。
 # --------------------------------------------------------------------------------------
 import os
 import sys
@@ -20,6 +20,8 @@ TOPIC = "edge/voice"
 
 
 def name(table, idx):
+    if idx == 0:
+        return "UNKNOWN"
     return table[idx - 1] if 1 <= idx <= len(table) else f"#{idx}"
 
 
