@@ -91,14 +91,14 @@ class DispatcherTests(unittest.TestCase):
         feed(d, ["open"] * 20)
         self.assertEqual(sender.fired, [])
 
-    def test_thumbs_up_switches_windows(self) -> None:
+    def test_four_switches_windows(self) -> None:
         d, sender = make()
-        feed(d, ["thumbs_up"] * 5 + ["open"] * 3 + ["thumbs_up"] * 5)
+        feed(d, ["four"] * 5 + ["open"] * 3 + ["four"] * 5)
         self.assertEqual(sender.fired, ["alt_tab", "alt_tab"])
 
     def test_hand_disappearing_rearms(self) -> None:
         d, sender = make()
-        feed(d, ["thumbs_up", "thumbs_up", None, None, "thumbs_up"])
+        feed(d, ["four", "four", None, None, "four"])
         self.assertEqual(sender.fired, ["alt_tab", "alt_tab"])
 
     def test_cooldown_blocks_pinch_flicker(self) -> None:
@@ -111,14 +111,14 @@ class DispatcherTests(unittest.TestCase):
 
     def test_switching_between_two_actions_needs_neutral(self) -> None:
         d, sender = make()
-        feed(d, ["open+pinch", "thumbs_up"])                  # 沒回中立，第二個不觸發
+        feed(d, ["open+pinch", "four"])                       # 沒回中立，第二個不觸發
         self.assertEqual(sender.fired, ["play_pause"])
-        feed(d, ["open", "thumbs_up"], start=10.0)
+        feed(d, ["open", "four"], start=10.0)
         self.assertEqual(sender.fired, ["play_pause", "alt_tab"])
 
     def test_unmapped_and_reserved_gestures_do_nothing(self) -> None:
         d, sender = make()
-        feed(d, ["point", "point+pinch", "two", "three", "six", "ok", "four", "fist"])
+        feed(d, ["point", "point+pinch", "two", "three", "six", "ok", "thumbs_up", "fist"])
         self.assertEqual(sender.fired, [])
 
     def test_pointing_and_clicking_never_fires_a_hotkey(self) -> None:
@@ -173,7 +173,7 @@ class DispatcherTests(unittest.TestCase):
         feed(d, ["open+pinch"] * 50, step=0.1)
         self.assertEqual(sender.fired, ["play_pause"])
         d2, sender2 = make()
-        feed(d2, ["thumbs_up"] * 50, step=0.1)
+        feed(d2, ["four"] * 50, step=0.1)
         self.assertEqual(sender2.fired, ["alt_tab"])
 
     def test_releasing_the_gesture_stops_the_repeat(self) -> None:
@@ -218,8 +218,8 @@ class DispatcherTests(unittest.TestCase):
 
 class ActionMapParsingTests(unittest.TestCase):
     def test_valid_map(self) -> None:
-        self.assertEqual(parse_action_map("open+pinch=play_pause,thumbs_up=alt_tab"),
-                         {"open+pinch": "play_pause", "thumbs_up": "alt_tab"})
+        self.assertEqual(parse_action_map("open+pinch=play_pause,four=alt_tab"),
+                         {"open+pinch": "play_pause", "four": "alt_tab"})
 
     def test_default_map_round_trips(self) -> None:
         text = ",".join(f"{t}={a}" for t, a in DEFAULT_ACTION_MAP.items())

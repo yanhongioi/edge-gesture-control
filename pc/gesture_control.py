@@ -11,7 +11,7 @@
 #                 短暫掉幀 (--scroll-hold 秒以內) 用原本的速度繼續捲，起點不重算
 #                 一比出 two 就會開始捲，沒有「停在原地」的狀態 —— 要停就別比 two
 #   open + 捏合    播放/暫停 (張開手掌再捏一下；放開手掌就能再捏一次)
-#   thumbs_up     切換視窗 (Alt+Tab)
+#   four          切換視窗 (Alt+Tab)（四指伸直、拇指收攏貼手掌）
 #                 以上是「一次性動作」：比出來只送一次，要先回到中立姿勢才能再觸發
 #                 (中立 = 手掌張開沒捏 / 握拳 / 手移出畫面)。--action-map 可以改對應
 #   rock + 捏合    音量加大        rock  音量減小
@@ -60,7 +60,7 @@ PINCH_SUFFIX = "+pinch"
 # 中立 token：看到其中之一才會重新「上膛」，同一個姿勢維持著不會連發。
 # open 沒捏 = 起手式；fist 按設計永遠不觸發任何動作 (拿刀具的手)；手不見 = None。
 NEUTRAL_TOKENS = (None, "open", "fist")
-DEFAULT_ACTION_MAP = {"open" + PINCH_SUFFIX: "play_pause", "thumbs_up": "alt_tab",
+DEFAULT_ACTION_MAP = {"open" + PINCH_SUFFIX: "play_pause", "four": "alt_tab",
                       "rock" + PINCH_SUFFIX: "volume_up", "rock": "volume_down"}
 # board/gesture.py classify_landmarks() 會回傳的全部手勢
 KNOWN_GESTURES = ("point", "two", "three", "four", "six", "rock", "ok", "open", "fist",
@@ -364,7 +364,7 @@ class GestureActionDispatcher:
              沒有這個的話，捏著不放 = 音樂瘋狂 play/pause。
       cooldown  擋住 open+pinch → open → open+pinch 這種一瞬間的抖動 (中間的 open 會重新上膛)。
 
-    連發動作的第一次也要通過這兩道 (所以 rock → thumbs_up 不會直接觸發，跟以前一樣)，
+    連發動作的第一次也要通過這兩道 (所以 rock → four 不會直接觸發，跟以前一樣)，
     但之後的連發不再檢查 —— 那是同一次「按住」的延續，不是新的觸發。
 
     open / open+pinch 這組搭配得剛好：張開手掌是中立，捏一下觸發，放開就自動重新上膛。
@@ -449,7 +449,7 @@ class GestureActionDispatcher:
 
 
 def parse_action_map(text):
-    """"open+pinch=play_pause,thumbs_up=alt_tab" → dict。
+    """"open+pinch=play_pause,four=alt_tab" → dict。
     token 是「手勢」或「手勢+pinch」(比出該手勢並且捏合)。
     名稱錯了就直接報錯，不要讓使用者以為綁好了、到現場才發現沒反應。"""
     mapping = {}
