@@ -23,6 +23,7 @@
 # 結束: Ctrl+C
 # --------------------------------------------------------------------------------------
 
+import os
 import sys
 import json
 import math
@@ -34,12 +35,27 @@ from collections import deque
 
 import paho.mqtt.client as mqtt
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from pc.control import hotkeys                                      # noqa: E402
+
 TOPIC = "edge/hand"
 INDEX_TIP = 8                  # MediaPipe 21 點：8 = 食指尖
 ANCHORS = {"tip": 8, "pip": 6, "mcp": 5}    # 游標跟哪個點：食指尖 / 食指第一節關節 / 食指根部
 PALM = (0, 5, 9, 13, 17)       # 手腕 + 四指根部，平均起來當作手掌中心
 CURSOR_GESTURE = "point"
 SCROLL_GESTURE = "two"
+
+# 一次性快捷鍵 (見 GestureActionDispatcher)
+# 中立手勢：看到其中之一才會重新「上膛」，同一個手勢比著不放不會連發。
+# open 是起手式，fist 按設計永遠不觸發任何動作 (拿刀具的手)，兩者都適合當中立。
+NEUTRAL_GESTURES = (None, "open", "fist")
+DEFAULT_ACTION_MAP = {"thumbs_up": "play_pause", "ok": "alt_tab"}
+# board/gesture.py classify_landmarks() 會回傳的全部手勢
+KNOWN_GESTURES = ("point", "two", "three", "four", "six", "rock", "ok", "open", "fist",
+                  "thumbs_up")
+# 已經有其他用途，不可以再綁快捷鍵
+RESERVED_GESTURES = (CURSOR_GESTURE, SCROLL_GESTURE, "fist", "open")
+
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_WHEEL = 0x0800
@@ -319,6 +335,74 @@ class ScrollJoystick:
         self.anchor, self.rate, self.dir, self.lost_since = None, 0.0, 0, None
 
 
+class GestureActionDispatcher:
+    """一次性快捷鍵 (播放/暫停、切視窗)。和 point/two 的「連續模式」不同：
+    只在『確認手勢改變』的那一瞬間送一次，不是每幀送。
+
+    防連發有兩道，缺一不可：
+      armed  比出動作手勢後就「卸膛」，要先看到中立手勢 (open / fist / 手不見) 才會重新上膛。
+             沒有這個的話，thumbs_up 比著不放 = 音樂瘋狂 play/pause。
+      cooldown  擋住 thumbs_up → None → thumbs_up 這種一瞬間的閃爍 (中間的 None 會重新上膛)。
+
+    只有游標和捲動都沒在跑的時候才會被呼叫，所以拖曳 / 捲動中途不會誤觸。"""
+
+    def __init__(self, args, sender=None):
+        self.args = args
+        self.action_map = args.action_map
+        self.sender = sender or hotkeys.HotkeySender(dry_run=args.dry_run)
+        self.last = None
+        self.armed = True
+        self.cooldown_until = 0.0
+
+    def update(self, hand, t):
+        g = hand.get("gesture") if hand else None
+        if g == self.last:
+            return                       # 同一個手勢持續中，不重複觸發
+        self.last = g
+        if g in NEUTRAL_GESTURES:
+            self.armed = True
+            return
+        action = self.action_map.get(g)
+        if action is None or not self.armed or t < self.cooldown_until:
+            return
+        self.armed = False
+        self.cooldown_until = t + self.args.action_cooldown
+        try:
+            label = self.sender.fire(action)
+        except hotkeys.HotkeyError as exc:
+            print(f"  ※ {g} → {action} 失敗：{exc}")
+            return
+        print(f"  ★ {g} → {label}" + ("  [dry-run，沒有真的送出]" if self.args.dry_run else ""))
+
+    def stop(self):
+        """收尾：確保沒有修飾鍵卡在按住的狀態 (見 hotkeys.py 的說明)"""
+        self.sender.release_modifiers()
+
+
+def parse_action_map(text):
+    """"thumbs_up=play_pause,ok=alt_tab" → dict。名稱錯了就直接報錯，
+    不要讓使用者以為綁好了、到現場才發現沒反應。"""
+    mapping = {}
+    for pair in text.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        gesture_name, sep, action = (s.strip() for s in pair.partition("="))
+        if not sep or not gesture_name or not action:
+            raise argparse.ArgumentTypeError(f"格式要是 手勢=動作，收到 {pair!r}")
+        if gesture_name not in KNOWN_GESTURES:
+            raise argparse.ArgumentTypeError(
+                f"沒有 {gesture_name!r} 這個手勢（可用：{', '.join(KNOWN_GESTURES)}）")
+        if gesture_name in RESERVED_GESTURES:
+            raise argparse.ArgumentTypeError(
+                f"{gesture_name!r} 已經有其他用途（游標 / 捲動 / 中立手勢），不能綁快捷鍵")
+        if action not in hotkeys.ACTIONS:
+            raise argparse.ArgumentTypeError(
+                f"沒有 {action!r} 這個動作（可用：{', '.join(sorted(hotkeys.ACTIONS))}）")
+        mapping[gesture_name] = action
+    return mapping
+
+
 def main():
     ap = argparse.ArgumentParser(description="gesture -> PC control")
     ap.add_argument("--broker", default="127.0.0.1", help="MQTT broker 的 IP")
@@ -356,6 +440,15 @@ def main():
     g.add_argument("--scroll-hold", type=float, default=0.5,
                    help="手或手勢短暫不見時，繼續用原本速度捲幾秒 (起點不重算)")
     g.add_argument("--scroll-invert", action="store_true", help="上下反過來")
+    g = ap.add_argument_group("快捷鍵 (一次性動作)")
+    default_map = ",".join(f"{k}={v}" for k, v in DEFAULT_ACTION_MAP.items())
+    g.add_argument("--action-map", type=parse_action_map, default=DEFAULT_ACTION_MAP,
+                   metavar="手勢=動作,...",
+                   help=f"手勢對應的快捷鍵（預設 {default_map}）。可用動作："
+                        + "、".join(f"{n} {label}" for n, label in hotkeys.iter_actions()))
+    g.add_argument("--action-cooldown", type=float, default=1.0,
+                   help="送出一次快捷鍵後，幾秒內不再送 (預設 1.0)")
+    g.add_argument("--no-actions", action="store_true", help="關閉所有快捷鍵")
     ap.add_argument("--stale", type=float, default=0.5, help="超過幾秒沒收到資料就停止動作")
     ap.add_argument("--dry-run", action="store_true", help="只印出動作，不真的控制電腦")
     args = ap.parse_args()
@@ -369,6 +462,7 @@ def main():
         screen = (1920, 1080)
     cursor = CursorController(args, screen)
     scroll = ScrollJoystick(args)
+    actions = None if args.no_actions else GestureActionDispatcher(args)
     lock = threading.Lock()
     state = {"stamp": 0.0}
 
@@ -391,6 +485,9 @@ def main():
             elif scroll.anchor is not None:               # 換成 point (游標模式)：捲動立刻停
                 print("  ■ 停止捲動（換成游標）")
                 scroll.stop()
+            # 快捷鍵只在游標和捲動都閒置時才看，拖曳 / 捲動中途不會誤觸
+            if actions is not None and cursor.state == "idle" and scroll.anchor is None:
+                actions.update(hand, now)
             state["stamp"] = now
 
     try:
@@ -406,6 +503,9 @@ def main():
     print(f"手勢對應: {CURSOR_GESTURE} = 游標 (跟著 {args.anchor}){click}，"
           f"{SCROLL_GESTURE} = 捲動 (手指向上 / 向下)"
           f"{'  [dry-run，不會真的控制]' if args.dry_run else ''}")
+    if actions is not None:
+        pairs = "，".join(f"{g} = {hotkeys.describe(a)}" for g, a in sorted(args.action_map.items()))
+        print(f"快捷鍵: {pairs}（比完要先回到 open / 握拳 / 把手收起來才能再觸發一次）")
     print(f"螢幕 {screen[0]}x{screen[1]}，鏡頭畫面中央 {args.region:.0%} 對應整個螢幕"
           f"{'，左右翻轉' if not args.no_mirror else ''}。Ctrl+C 結束。")
 
@@ -435,6 +535,8 @@ def main():
     finally:
         with lock:
             cursor.stop("（程式結束）")                  # 左鍵一定要放開
+            if actions is not None:
+                actions.stop()                           # 修飾鍵 (Alt) 一定要放開
         client.loop_stop()
         client.disconnect()
         print("結束")
