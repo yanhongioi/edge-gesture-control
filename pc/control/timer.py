@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import shutil
 import subprocess
@@ -24,6 +24,7 @@ class TimerResult:
     seconds: int
     label: str
     process_id: int
+    process: Any = field(default=None, repr=False, compare=False)
 
 
 def start_timer(
@@ -75,4 +76,72 @@ def start_timer(
         seconds=seconds,
         label=normalized_label,
         process_id=int(process.pid),
+        process=process,
     )
+
+
+def is_timer_running(timer: TimerResult) -> bool:
+    """Return whether the timer worker is still alive."""
+    if timer.process is None:
+        # Custom launchers may only expose a PID. Treat it as active until a
+        # matching custom canceller reports otherwise.
+        return True
+    try:
+        return timer.process.poll() is None
+    except (AttributeError, OSError):
+        return False
+
+
+def cancel_timer(timer: TimerResult) -> bool:
+    """Stop the exact timer worker returned by start_timer."""
+    process = timer.process
+    if process is None:
+        return False
+    try:
+        if process.poll() is not None:
+            return False
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=2)
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+class TimerController:
+    """Track and cancel the most recently started local timer."""
+
+    def __init__(
+        self,
+        launcher: Callable[..., TimerResult] = start_timer,
+        canceller: Callable[[TimerResult], bool] = cancel_timer,
+        active_checker: Callable[[TimerResult], bool] = is_timer_running,
+    ) -> None:
+        self.launcher = launcher
+        self.canceller = canceller
+        self.active_checker = active_checker
+        self._active: TimerResult | None = None
+
+    @property
+    def has_timer(self) -> bool:
+        if self._active is None:
+            return False
+        if self.active_checker(self._active):
+            return True
+        self._active = None
+        return False
+
+    def start(self, seconds: int, label: str) -> TimerResult:
+        result = self.launcher(seconds, label)
+        self._active = result
+        return result
+
+    def cancel(self) -> bool:
+        if not self.has_timer or self._active is None:
+            return False
+        timer = self._active
+        self._active = None
+        return self.canceller(timer)

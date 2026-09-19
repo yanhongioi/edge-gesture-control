@@ -44,7 +44,7 @@ def _enforce_semantic_policy(text: str, plan: AgentPlan) -> AgentPlan:
         query = text.strip()[:200]
         return replace(
             plan,
-            reply=f"好的，準備搜尋{query}。",
+            reply=f"是的，主人，準備搜尋 {query} 的資料。",
             actions=(
                 ToolAction(
                     "search_web",

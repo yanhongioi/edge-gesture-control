@@ -3,11 +3,29 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
-from pc.control.timer import TimerError, start_timer
+from pc.control.timer import TimerController, TimerError, TimerResult, cancel_timer, start_timer
 
 
 class FakeProcess:
     pid = 4321
+
+
+class RunningProcess:
+    pid = 5678
+
+    def __init__(self) -> None:
+        self.running = True
+        self.terminated = False
+
+    def poll(self):  # type: ignore[no-untyped-def]
+        return None if self.running else 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.running = False
+
+    def wait(self, timeout=None):  # type: ignore[no-untyped-def]
+        return 0
 
 
 class TimerTests(unittest.TestCase):
@@ -45,6 +63,26 @@ class TimerTests(unittest.TestCase):
             start_timer(1, "  ")
         with self.assertRaises(TimerError):
             start_timer(1, "字" * 81)
+
+    def test_cancel_timer_terminates_the_exact_worker(self) -> None:
+        process = RunningProcess()
+        result = TimerResult(60, "測試", process.pid, process)
+        self.assertTrue(cancel_timer(result))
+        self.assertTrue(process.terminated)
+        self.assertFalse(cancel_timer(result))
+
+    def test_controller_tracks_and_cancels_latest_timer(self) -> None:
+        process = RunningProcess()
+        controller = TimerController(
+            launcher=lambda seconds, label: TimerResult(
+                seconds, label, process.pid, process
+            )
+        )
+        controller.start(60, "測試")
+        self.assertTrue(controller.has_timer)
+        self.assertTrue(controller.cancel())
+        self.assertFalse(controller.has_timer)
+        self.assertFalse(controller.cancel())
 
 
 if __name__ == "__main__":

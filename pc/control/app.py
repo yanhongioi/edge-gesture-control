@@ -10,8 +10,10 @@ from pc.llm import AgentPlanner
 
 from .browser import BrowserControlError
 from .executor import ControlExecutionError, ControlExecutor
+from .media import MediaControlError
 from .youtube import YouTubeError
 from .timer import TimerError
+from .windows_input import WindowsInputError
 
 
 def main() -> int:
@@ -45,7 +47,14 @@ def main() -> int:
         results = ControlExecutor(
             open_first_search_result=search_override
         ).execute(plan, confirmed=True)
-    except (BrowserControlError, ControlExecutionError, TimerError, YouTubeError) as exc:
+    except (
+        BrowserControlError,
+        ControlExecutionError,
+        MediaControlError,
+        TimerError,
+        WindowsInputError,
+        YouTubeError,
+    ) as exc:
         print(f"執行失敗：{exc}", file=sys.stderr)
         return 1
     for result in results:

@@ -13,27 +13,27 @@ class WakeWordTests(unittest.TestCase):
         self.assertEqual(decision.command, "播放周杰倫的晴天")
 
     def test_phrase_alone_arms_next_utterance(self) -> None:
-        gate = WakeWordGate("嘿小黑鬼", armed_timeout_seconds=8.0)
+        gate = WakeWordGate("嘿小黑鬼")
         self.assertEqual(gate.process("嘿小黑鬼", now=10.0).status, "armed")
-        decision = gate.process("幫我找雞胸肉食譜", now=17.9)
+        decision = gate.process("幫我找雞胸肉食譜", now=19.9)
         self.assertEqual(decision.status, "command")
         self.assertEqual(decision.command, "幫我找雞胸肉食譜")
 
     def test_armed_state_expires(self) -> None:
-        gate = WakeWordGate("嘿小黑鬼", armed_timeout_seconds=8.0)
+        gate = WakeWordGate("嘿小黑鬼")
         gate.process("嘿小黑鬼", now=10.0)
-        self.assertEqual(gate.process("播放晴天", now=18.1).status, "ignored")
+        self.assertEqual(gate.process("播放晴天", now=20.1).status, "ignored")
 
     def test_phrase_must_be_at_start(self) -> None:
         gate = WakeWordGate("嘿小黑鬼")
         self.assertEqual(gate.process("我剛才說嘿小黑鬼", now=1.0).status, "ignored")
 
     def test_external_arm_accepts_next_utterance(self) -> None:
-        gate = WakeWordGate("NXP", armed_timeout_seconds=8.0)
+        gate = WakeWordGate("NXP", armed_timeout_seconds=10.0)
         self.assertFalse(gate.is_armed(now=1.0))
         gate.arm(now=10.0)
-        self.assertTrue(gate.is_armed(now=17.9))
-        self.assertFalse(gate.is_armed(now=18.1))
+        self.assertTrue(gate.is_armed(now=19.9))
+        self.assertFalse(gate.is_armed(now=20.1))
         decision = gate.process("播放周杰倫的晴天", now=12.0)
         self.assertEqual(decision.status, "command")
         self.assertEqual(decision.command, "播放周杰倫的晴天")
@@ -48,10 +48,10 @@ class WakeWordTests(unittest.TestCase):
             self.assertEqual(decision.command, "播放音樂", text)
 
     def test_armed_wake_phrase_alone_keeps_waiting(self) -> None:
-        gate = WakeWordGate("NXP", armed_timeout_seconds=8.0)
+        gate = WakeWordGate("NXP", armed_timeout_seconds=10.0)
         gate.arm(now=0.0)
-        self.assertEqual(gate.process("Hey NXP.", now=7.0).status, "armed")
-        decision = gate.process("下一首", now=14.0)
+        self.assertEqual(gate.process("Hey NXP.", now=9.0).status, "armed")
+        decision = gate.process("下一首", now=18.0)
         self.assertEqual(decision.status, "command")
         self.assertEqual(decision.command, "下一首")
 

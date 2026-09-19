@@ -9,7 +9,7 @@ import unicodedata
 
 
 DEFAULT_WAKE_PHRASE = "NXP"
-DEFAULT_ARMED_TIMEOUT_SECONDS = 8.0
+DEFAULT_ARMED_TIMEOUT_SECONDS = 10.0
 CANCEL_PHRASES = frozenset({"取消", "算了", "不用了"})
 # 板子 VIT 的喚醒詞是「Hey NXP」，Whisper 常把它一起轉進句首：「Hey NXP，播放音樂」、「嘿 NXP 播放音樂」
 WAKE_GREETINGS = ("hey", "hi", "hei", "嘿", "黑", "嗨", "海")

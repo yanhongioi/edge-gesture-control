@@ -13,6 +13,22 @@ from pc.control.youtube import (
 
 
 class YouTubeTests(unittest.TestCase):
+    def test_pinned_yu_ai_track_bypasses_search_resolver(self) -> None:
+        def unexpected_resolver(_query: str) -> str | None:
+            self.fail("固定歌曲不應呼叫 YouTube 搜尋解析器")
+
+        result = play_music(
+            "雨愛 DJ版",
+            open_browser=False,
+            video_resolver=unexpected_resolver,
+        )
+        self.assertTrue(result.direct_result)
+        self.assertEqual(
+            result.url,
+            "https://www.youtube.com/watch?"
+            "v=8cazyIg6M8k&list=RD8cazyIg6M8k&start_radio=1",
+        )
+
     def test_direct_video_is_used(self) -> None:
         result = play_music(
             "周杰倫 晴天",

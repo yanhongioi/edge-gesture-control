@@ -15,12 +15,14 @@ MAX_QUERY_LENGTH = 200
 MAX_TIMER_SECONDS = 24 * 60 * 60
 MAX_TIMER_LABEL_LENGTH = 80
 MUSIC_SELECTIONS = frozenset({"track", "playlist"})
+PLAYBACK_OPERATIONS = frozenset({"play", "pause"})
 
 ALLOWED_INTENTS = frozenset({"answer", "action", "clarify"})
 ALLOWED_TOOLS = frozenset(
     {
         "scroll", "press_hotkey", "open_url", "launch_app", "type_text",
-        "search_web", "play_music", "set_timer",
+        "search_web", "play_music", "control_playback", "adjust_volume",
+        "set_volume", "set_timer", "cancel_timer",
     }
 )
 ALLOWED_APPS = frozenset(
@@ -85,6 +87,7 @@ class AgentPlan:
     latency_seconds: float = field(default=0.0, compare=False)
     tokens_per_second: float | None = field(default=None, compare=False)
     error: str | None = field(default=None, compare=False)
+    speak_reply: bool = field(default=True, compare=False)
 
     def to_dict(self) -> dict[str, Any]:
         """只輸出未來控制層需要的公開資料。"""
@@ -195,6 +198,36 @@ def _validate_music_search(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"query": query, "selection": selection}
 
 
+def _validate_playback_control(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_exact_keys(arguments, {"operation"}, "control_playback.arguments")
+    operation = arguments["operation"]
+    if not isinstance(operation, str) or operation not in PLAYBACK_OPERATIONS:
+        raise PlanValidationError(
+            f"control_playback.operation 只允許：{sorted(PLAYBACK_OPERATIONS)}"
+        )
+    return {"operation": operation}
+
+
+def _validate_volume_adjustment(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_exact_keys(arguments, {"steps"}, "adjust_volume.arguments")
+    steps = arguments["steps"]
+    if isinstance(steps, bool) or not isinstance(steps, int):
+        raise PlanValidationError("adjust_volume.steps 必須是整數")
+    if steps == 0 or not -10 <= steps <= 10:
+        raise PlanValidationError("adjust_volume.steps 必須介於 -10 到 10 且不可為 0")
+    return {"steps": steps}
+
+
+def _validate_volume_level(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_exact_keys(arguments, {"level"}, "set_volume.arguments")
+    level = arguments["level"]
+    if isinstance(level, bool) or not isinstance(level, int):
+        raise PlanValidationError("set_volume.level 必須是整數")
+    if not 0 <= level <= 100:
+        raise PlanValidationError("set_volume.level 必須介於 0 到 100")
+    return {"level": level}
+
+
 def _validate_timer(arguments: dict[str, Any]) -> dict[str, Any]:
     _require_exact_keys(arguments, {"seconds", "label"}, "set_timer.arguments")
     seconds = arguments["seconds"]
@@ -212,6 +245,11 @@ def _validate_timer(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"seconds": seconds, "label": label.strip()}
 
 
+def _validate_no_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    _require_exact_keys(arguments, set(), "cancel_timer.arguments")
+    return {}
+
+
 ARGUMENT_VALIDATORS = {
     "scroll": _validate_scroll,
     "press_hotkey": _validate_hotkey,
@@ -220,7 +258,11 @@ ARGUMENT_VALIDATORS = {
     "type_text": _validate_typed_text,
     "search_web": _validate_web_search,
     "play_music": _validate_music_search,
+    "control_playback": _validate_playback_control,
+    "adjust_volume": _validate_volume_adjustment,
+    "set_volume": _validate_volume_level,
     "set_timer": _validate_timer,
+    "cancel_timer": _validate_no_arguments,
 }
 
 
@@ -430,6 +472,66 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
                         "additionalProperties": False,
                         "required": ["tool", "arguments"],
                         "properties": {
+                            "tool": {"const": "control_playback"},
+                            "arguments": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["operation"],
+                                "properties": {
+                                    "operation": {
+                                        "type": "string",
+                                        "enum": sorted(PLAYBACK_OPERATIONS),
+                                    }
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["tool", "arguments"],
+                        "properties": {
+                            "tool": {"const": "adjust_volume"},
+                            "arguments": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["steps"],
+                                "properties": {
+                                    "steps": {
+                                        "type": "integer",
+                                        "minimum": -10,
+                                        "maximum": 10,
+                                        "not": {"const": 0},
+                                    }
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["tool", "arguments"],
+                        "properties": {
+                            "tool": {"const": "set_volume"},
+                            "arguments": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "required": ["level"],
+                                "properties": {
+                                    "level": {
+                                        "type": "integer",
+                                        "minimum": 0,
+                                        "maximum": 100,
+                                    }
+                                },
+                            },
+                        },
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["tool", "arguments"],
+                        "properties": {
                             "tool": {"const": "set_timer"},
                             "arguments": {
                                 "type": "object",
@@ -447,6 +549,19 @@ PLAN_JSON_SCHEMA: dict[str, Any] = {
                                         "maxLength": MAX_TIMER_LABEL_LENGTH,
                                     },
                                 },
+                            },
+                        },
+                    },
+                    {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "required": ["tool", "arguments"],
+                        "properties": {
+                            "tool": {"const": "cancel_timer"},
+                            "arguments": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {},
                             },
                         },
                     },

@@ -36,6 +36,72 @@ class ValidatePlanTests(unittest.TestCase):
             )
             self.assertEqual(plan.actions[0].tool, tool)
 
+    def test_valid_playback_control(self) -> None:
+        for operation in ("play", "pause"):
+            plan = validate_plan(
+                {
+                    "intent": "action",
+                    "reply": "是的，主人。",
+                    "actions": [
+                        {
+                            "tool": "control_playback",
+                            "arguments": {"operation": operation},
+                        }
+                    ],
+                }
+            )
+            self.assertEqual(plan.actions[0].arguments["operation"], operation)
+
+    def test_invalid_playback_control_is_rejected(self) -> None:
+        with self.assertRaises(PlanValidationError):
+            validate_plan(
+                {
+                    "intent": "action",
+                    "reply": "錯誤。",
+                    "actions": [
+                        {
+                            "tool": "control_playback",
+                            "arguments": {"operation": "toggle"},
+                        }
+                    ],
+                }
+            )
+
+    def test_valid_volume_actions(self) -> None:
+        cases = (
+            ("adjust_volume", {"steps": -3}),
+            ("set_volume", {"level": 75}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(tool=tool):
+                plan = validate_plan(
+                    {
+                        "intent": "action",
+                        "reply": "是的，主人。",
+                        "actions": [{"tool": tool, "arguments": arguments}],
+                    }
+                )
+                self.assertEqual(plan.actions[0].arguments, arguments)
+
+    def test_invalid_volume_actions_are_rejected(self) -> None:
+        cases = (
+            ("adjust_volume", {"steps": 0}),
+            ("adjust_volume", {"steps": 11}),
+            ("set_volume", {"level": -1}),
+            ("set_volume", {"level": 101}),
+        )
+        for tool, arguments in cases:
+            with self.subTest(tool=tool, arguments=arguments), self.assertRaises(
+                PlanValidationError
+            ):
+                validate_plan(
+                    {
+                        "intent": "action",
+                        "reply": "錯誤。",
+                        "actions": [{"tool": tool, "arguments": arguments}],
+                    }
+                )
+
     def test_empty_query_is_rejected(self) -> None:
         with self.assertRaises(PlanValidationError):
             validate_plan(
@@ -114,6 +180,26 @@ class ValidatePlanTests(unittest.TestCase):
                         ],
                     }
                 )
+
+    def test_cancel_timer_requires_empty_arguments(self) -> None:
+        plan = validate_plan(
+            {
+                "intent": "action",
+                "reply": "取消計時。",
+                "actions": [{"tool": "cancel_timer", "arguments": {}}],
+            }
+        )
+        self.assertEqual(plan.actions[0].arguments, {})
+        with self.assertRaises(PlanValidationError):
+            validate_plan(
+                {
+                    "intent": "action",
+                    "reply": "取消計時。",
+                    "actions": [
+                        {"tool": "cancel_timer", "arguments": {"all": True}}
+                    ],
+                }
+            )
 
     def test_invalid_json_shape(self) -> None:
         with self.assertRaises(PlanValidationError):

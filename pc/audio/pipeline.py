@@ -12,7 +12,7 @@ from pc.llm.schemas import AgentPlan
 from .wakeword import CANCEL_PHRASES, WakeDecision, WakeWordGate, normalize_text
 
 
-DEFAULT_FOLLOWUP_TIMEOUT_SECONDS = 20.0
+DEFAULT_FOLLOWUP_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,25 @@ class VoiceCommandPipeline:
 
     @property
     def awaiting_followup(self) -> bool:
-        return self._followup_until is not None
+        return self.is_awaiting_followup()
+
+    def is_awaiting_followup(self, *, now: float | None = None) -> bool:
+        """回報追問窗口是否仍有效，並順便清掉已逾時的狀態。"""
+        if self._followup_until is None:
+            return False
+        current_time = time.monotonic() if now is None else now
+        if current_time > self._followup_until:
+            self._followup_until = None
+            return False
+        return True
+
+    def renew_followup_window(self, *, now: float | None = None) -> bool:
+        """TTS 與殘響處理完成後，重新給使用者完整的追問時間。"""
+        if self._followup_until is None:
+            return False
+        current_time = time.monotonic() if now is None else now
+        self._followup_until = current_time + self.followup_timeout_seconds
+        return True
 
     def handle_text(
         self,
@@ -82,13 +100,11 @@ class VoiceCommandPipeline:
             return VoicePipelineResult(decision=decision)
 
         plan = self.planner.plan(decision.command, screen_context=screen_context)
+        if self.execute and plan.error is None:
+            prepare_plan = getattr(self.executor, "prepare_plan", None)
+            if callable(prepare_plan):
+                plan = prepare_plan(plan)
         executions: tuple[Any, ...] = ()
-        if self.execute and plan.error is None and self.reply_speaker is not None:
-            self.reply_speaker(plan.reply)
-        if plan.intent == "clarify" and plan.error is None:
-            # 真實執行時從語音回覆播放完畢後開始計算等待時間。
-            followup_started_at = current_time if now is not None else time.monotonic()
-            self._followup_until = followup_started_at + self.followup_timeout_seconds
         if (
             self.execute
             and plan.error is None
@@ -96,6 +112,17 @@ class VoiceCommandPipeline:
             and plan.actions
         ):
             executions = self.executor.execute(plan, confirmed=True)
+        if (
+            self.execute
+            and plan.error is None
+            and plan.speak_reply
+            and self.reply_speaker is not None
+        ):
+            self.reply_speaker(plan.reply)
+        if plan.intent == "clarify" and plan.error is None:
+            # 真實執行時從語音回覆播放完畢後開始計算等待時間。
+            followup_started_at = current_time if now is not None else time.monotonic()
+            self._followup_until = followup_started_at + self.followup_timeout_seconds
         return VoicePipelineResult(
             decision=decision,
             plan=plan,

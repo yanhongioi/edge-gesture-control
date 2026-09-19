@@ -48,6 +48,5 @@ class WindowsTtsTests(unittest.TestCase):
         with self.assertRaises(WindowsTtsError):
             speaker.speak_async("  ")
 
-
 if __name__ == "__main__":
     unittest.main()

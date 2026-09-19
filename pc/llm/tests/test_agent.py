@@ -4,6 +4,7 @@ import unittest
 
 from pc.llm.agent import AgentPlanner
 from pc.llm.client import ChatResult
+from pc.llm.schemas import ToolAction
 
 
 class FakeClient:
@@ -33,6 +34,98 @@ class AgentPlannerTests(unittest.TestCase):
         self.assertEqual(plan.source, "rule")
         self.assertEqual(plan.actions[0].tool, "scroll")
         self.assertEqual(client.calls, 0)
+
+    def test_scroll_distance_phrases_use_three_levels(self) -> None:
+        cases = {
+            "往下": -600,
+            "幫我往下一點": -400,
+            "往下一點點": -200,
+            "往上": 600,
+            "請往上一點": 400,
+            "麻煩幫我往上一點點": 200,
+        }
+        for text, amount in cases.items():
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.actions[0].tool, "scroll")
+                self.assertEqual(plan.actions[0].arguments["amount"], amount)
+                self.assertEqual(client.calls, 0)
+
+    def test_scroll_to_top_and_bottom_use_safe_hotkeys(self) -> None:
+        for text, key in (("最上面", "home"), ("幫我到最下面", "end")):
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.actions[0].tool, "press_hotkey")
+                self.assertEqual(plan.actions[0].arguments["keys"], ["ctrl", key])
+                self.assertEqual(client.calls, 0)
+
+    def test_relative_volume_phrases_use_three_levels(self) -> None:
+        cases = {
+            "大聲點": 15,
+            "幫我大聲一點": 10,
+            "大聲一點點": 5,
+            "小聲點": -15,
+            "請小聲一點": -10,
+            "麻煩幫我小聲一點點": -5,
+        }
+        for text, steps in cases.items():
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.actions[0].tool, "adjust_volume")
+                self.assertEqual(plan.actions[0].arguments["steps"], steps)
+                self.assertEqual(client.calls, 0)
+
+    def test_captain_volume_commands_use_fixed_levels_and_reply(self) -> None:
+        for text, level in (("閉嘴", 0), ("太小聲喽", 100), ("太小聲囉", 100)):
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.reply, "是的船長!")
+                self.assertEqual(plan.actions[0].tool, "set_volume")
+                self.assertEqual(plan.actions[0].arguments["level"], level)
+                self.assertEqual(plan.speak_reply, level != 0)
+                self.assertEqual(client.calls, 0)
+
+    def test_absolute_volume_accepts_digits_and_chinese_numbers(self) -> None:
+        for text, level in (
+            ("幫我把音量調到50", 50),
+            ("請把音量設定成百分之八十", 80),
+            ("音量設到100%", 100),
+        ):
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.actions[0].tool, "set_volume")
+                self.assertEqual(plan.actions[0].arguments["level"], level)
+                self.assertEqual(client.calls, 0)
+
+    def test_absolute_volume_rejects_missing_or_out_of_range_level(self) -> None:
+        for text in ("幫我把音量調到多少", "把音量調到101"):
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.intent, "clarify")
+                self.assertEqual(plan.actions, ())
+                self.assertEqual(client.calls, 0)
+
+    def test_pause_and_resume_use_stateful_playback_tool(self) -> None:
+        for text, operation in (
+            ("暫停", "pause"),
+            ("幫我暫停影片", "pause"),
+            ("播放", "play"),
+            ("請幫我播放音樂", "play"),
+            ("繼續播放", "play"),
+        ):
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.source, "rule")
+                self.assertEqual(plan.actions[0].tool, "control_playback")
+                self.assertEqual(plan.actions[0].arguments["operation"], operation)
+                self.assertEqual(client.calls, 0)
 
     def test_ambiguous_rule_asks_for_clarification(self) -> None:
         client = FakeClient("not used")
@@ -72,6 +165,15 @@ class AgentPlannerTests(unittest.TestCase):
         self.assertEqual(plan.intent, "clarify")
         self.assertEqual(plan.actions, ())
         self.assertEqual(client.calls, 0)
+
+    def test_cancel_timer_uses_fast_rule(self) -> None:
+        for text in ("取消計時器", "停止計時", "關掉計時器"):
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.source, "rule")
+                self.assertEqual(plan.actions[0], ToolAction("cancel_timer", {}))
+                self.assertEqual(client.calls, 0)
 
     def test_timer_followup_uses_context_without_calling_model(self) -> None:
         client = FakeClient("not used")
@@ -146,6 +248,31 @@ class AgentPlannerTests(unittest.TestCase):
         plan = AgentPlanner(client=client).plan("幫我播韓文歌")  # type: ignore[arg-type]
         self.assertEqual(plan.source, "llm")
         self.assertEqual(plan.actions[0].tool, "play_music")
+
+    def test_yu_ai_dj_homophones_use_pinned_music_rule(self) -> None:
+        for text in (
+            "播放與愛DJ版",
+            "幫我放雨愛 DJ 版",
+            "我想聽語愛低階版",
+            "來首魚愛迪傑版",
+            "播放瑜愛低機版",
+        ):
+            with self.subTest(text=text):
+                client = FakeClient("not used")
+                plan = AgentPlanner(client=client).plan(text)  # type: ignore[arg-type]
+                self.assertEqual(plan.source, "rule")
+                self.assertEqual(plan.actions[0].tool, "play_music")
+                self.assertEqual(
+                    plan.actions[0].arguments,
+                    {"query": "雨愛 DJ版", "selection": "track"},
+                )
+                self.assertEqual(client.calls, 0)
+
+    def test_yu_ai_dj_search_does_not_trigger_pinned_playback(self) -> None:
+        client = FakeClient("not used")
+        plan = AgentPlanner(client=client).plan("搜尋與愛DJ版")  # type: ignore[arg-type]
+        self.assertEqual(plan.actions[0].tool, "search_web")
+        self.assertEqual(client.calls, 0)
 
     def test_empty_input_returns_clarify_without_model(self) -> None:
         client = FakeClient("not used")

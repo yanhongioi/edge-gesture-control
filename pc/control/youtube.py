@@ -16,6 +16,12 @@ YOUTUBE_RESULT_TIMEOUT_SECONDS = 6.0
 YOUTUBE_HOSTS = frozenset(
     {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
 )
+PINNED_TRACK_URLS = {
+    "雨愛 dj版": (
+        "https://www.youtube.com/watch?"
+        "v=8cazyIg6M8k&list=RD8cazyIg6M8k&start_radio=1"
+    ),
+}
 
 
 class YouTubeError(RuntimeError):
@@ -137,17 +143,24 @@ def play_music(
     normalized = _normalize_query(query)
     if selection not in {"track", "playlist"}:
         raise YouTubeError("播放類型只允許 track 或 playlist")
+    pinned_url = (
+        PINNED_TRACK_URLS.get(normalized.casefold())
+        if selection == "track"
+        else None
+    )
     if selection == "playlist":
         resolver_query = f"site:youtube.com/playlist {normalized}"
         fallback_query = normalized if "playlist" in normalized.casefold() else f"{normalized} playlist"
     else:
         resolver_query = f"site:youtube.com/watch {normalized}"
         fallback_query = normalized
-    candidate = (
-        video_resolver(resolver_query)
-        if video_resolver is not None
-        else resolve_youtube_result(normalized, selection)
-    )
+    candidate = pinned_url
+    if candidate is None:
+        candidate = (
+            video_resolver(resolver_query)
+            if video_resolver is not None
+            else resolve_youtube_result(normalized, selection)
+        )
     direct_result = _is_direct_youtube_result(candidate, selection)
     url = (
         candidate

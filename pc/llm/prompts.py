@@ -16,7 +16,11 @@ reply 必須是簡短、自然的臺灣繁體中文，適合未來直接交給 T
 - type_text: {"text": "最多 200 字"}。
 - search_web: {"query": "要搜尋的內容", "open_first_result": true|false}，用預設瀏覽器搜尋。
 - play_music: {"query": "適合 YouTube 的搜尋詞", "selection": "track|playlist"}，只透過 YouTube 播放。
+- control_playback: {"operation": "play|pause"}，控制本次工作階段最近播放的媒體；只有「播放／繼續／暫停」且沒有新歌名時使用。
+- adjust_volume: {"steps": -10 到 10 的非零整數}，相對調整系統音量。
+- set_volume: {"level": 0 到 100 的整數}，把系統音量設定到指定比例。
 - set_timer: {"seconds": 1 到 86400 的整數, "label": "簡短名稱"}，啟動本機 Windows 計時器。
+- cancel_timer: {}，取消目前作用中的本機計時器。
 
 規則：
 1. intent 只能是 answer、action、clarify。
@@ -29,6 +33,7 @@ reply 必須是簡短、自然的臺灣繁體中文，適合未來直接交給 T
 8. 不要宣稱動作已完成，只能說「準備」或「將會」。
 9. 若是音調和喚醒詞相似，就主要以喚醒詞當結果，不要去找同音異字
 10. 計時、倒數或提醒幾分鐘後通知時使用 set_timer；必須把小時與分鐘換算成整數秒。沒有時間長度時使用 clarify。
+   取消、停止或關掉目前的計時器時使用 cancel_timer。
 11. 口語動詞可以不完整或不精確，優先依歌曲、歌手、食材、料理、時間長度等名詞判斷意圖，並完整保留這些名詞。常見口語如「放歌」等同播放音樂、「怎做」等同怎麼做、「怎煮」等同怎麼煮；但只有單獨名詞、完全沒有動作或問題語意時不可自行執行。
 
 範例：使用者說「幫我找雞胸肉食譜」時，輸出
