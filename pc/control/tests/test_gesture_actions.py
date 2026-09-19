@@ -27,10 +27,10 @@ class FakeSender:
         self.released += 1
 
 
-def make(cooldown: float = 0.0, action_map=None, repeat_delay: float = 0.4,
-         repeat: float = 0.15):
+def make(cooldown: float = 0.0, action_map=None, hold: float = 1.0,
+         repeat: float = 0.25):
     args = argparse.Namespace(action_map=dict(action_map or DEFAULT_ACTION_MAP),
-                              action_cooldown=cooldown, action_repeat_delay=repeat_delay,
+                              action_cooldown=cooldown, action_hold=hold,
                               action_repeat=repeat, dry_run=True)
     sender = FakeSender()
     return GestureActionDispatcher(args, sender=sender), sender
@@ -45,6 +45,24 @@ def feed(dispatcher, poses, start=0.0, step=1.0):
             name, _, pinch = pose.partition("+")
             hand = {"gesture": name, "pinch": bool(pinch)}
         dispatcher.update(hand, start + i * step)
+
+
+FRAME = 1.0 / 30                         # 板子 --mqtt-hz 30，每幀約 33ms
+
+
+def hold_pose(dispatcher, sender, pose, seconds, start=0.0):
+    """像板子一樣用 30 Hz 餵同一個姿勢 seconds 秒，回傳每次送出動作的時間。
+    用實際觸發時間斷言，而不是手算次數 —— 次數會被取樣量化影響，時間不會。"""
+    name, _, pinch = pose.partition("+")
+    hand = {"gesture": name, "pinch": bool(pinch)}
+    fired_at, t, end = [], start, start + seconds
+    while t <= end + 1e-9:
+        before = len(sender.fired)
+        dispatcher.update(hand, t)
+        if len(sender.fired) > before:
+            fired_at.append(t)
+        t += FRAME
+    return fired_at
 
 
 class TokenTests(unittest.TestCase):
@@ -116,21 +134,38 @@ class DispatcherTests(unittest.TestCase):
         feed(d, ["fist"] * 10)
         self.assertEqual(sender.fired, [])
 
-    def test_volume_repeats_while_held(self) -> None:
-        """音量是連發動作：比著 rock 不放，每隔 --action-repeat 秒再送一次。"""
-        d, sender = make(repeat_delay=0.4, repeat=0.15)
-        feed(d, ["rock"], start=0.0)
-        self.assertEqual(sender.fired, ["volume_down"])      # 第一次
-        feed(d, ["rock"] * 10, start=0.03, step=0.03)        # 到 0.30，還沒到連發延遲
-        self.assertEqual(sender.fired, ["volume_down"])
-        # 0.33 ~ 0.99 每 30ms 一幀 (板子送 30 Hz)：0.4 開始連發，之後每 0.15 秒一次
-        feed(d, ["rock"] * 23, start=0.33, step=0.03)
-        self.assertEqual(sender.fired, ["volume_down"] * 5)
+    def test_volume_waits_for_a_stable_hold_then_repeats(self) -> None:
+        """要穩定比著 --action-hold 秒才開始調整，之後每 --action-repeat 秒一階。"""
+        d, sender = make(hold=1.0, repeat=0.25)
+        at = hold_pose(d, sender, "rock", 2.0)
+        self.assertTrue(at, "撐滿一秒之後應該要開始調整")
+        self.assertGreaterEqual(at[0], 1.0)                  # 一秒之內一定不動
+        self.assertLess(at[0], 1.0 + FRAME * 2)              # 撐滿就要馬上開始
+        gaps = [b - a for a, b in zip(at, at[1:])]
+        self.assertTrue(all(0.25 <= g < 0.25 + FRAME * 2 for g in gaps), gaps)
+        self.assertEqual(set(sender.fired), {"volume_down"})
 
     def test_pinched_rock_repeats_volume_up(self) -> None:
         d, sender = make()
-        feed(d, ["rock+pinch"] * 30, step=0.03)              # 0.87 秒
-        self.assertEqual(sender.fired, ["volume_up"] * 5)
+        at = hold_pose(d, sender, "rock+pinch", 2.0)
+        self.assertGreaterEqual(at[0], 1.0)
+        self.assertEqual(set(sender.fired), {"volume_up"})
+
+    def test_a_gesture_flickering_past_never_touches_the_volume(self) -> None:
+        """這就是 --action-hold 的目的：手在換姿勢的過程中被判成 rock 幾幀，不該調到音量。"""
+        d, sender = make()
+        hold_pose(d, sender, "rock", 0.24)                   # 0.24 秒就放掉
+        hold_pose(d, sender, "open", 0.2, start=0.3)
+        self.assertEqual(sender.fired, [])
+
+    def test_the_hold_restarts_when_the_pose_changes(self) -> None:
+        """撐了一半改成捏合 = 換了方向，要重新撐滿一秒，不能接續前面的計時。"""
+        d, sender = make()
+        hold_pose(d, sender, "rock", 0.7)                    # 撐了 0.7 秒就改姿勢
+        self.assertEqual(sender.fired, [])
+        at = hold_pose(d, sender, "rock+pinch", 1.5, start=0.7)
+        self.assertGreaterEqual(at[0], 0.7 + 1.0)            # 從改姿勢那一刻重新起算
+        self.assertEqual(set(sender.fired), {"volume_up"})
 
     def test_one_shot_actions_never_repeat(self) -> None:
         """播放/暫停連發等於沒按，Alt+Tab 連發會在兩個視窗之間狂跳。"""
@@ -143,25 +178,26 @@ class DispatcherTests(unittest.TestCase):
 
     def test_releasing_the_gesture_stops_the_repeat(self) -> None:
         d, sender = make()
-        feed(d, ["rock"], start=0.0)
-        feed(d, ["open"], start=0.4)                         # 放掉 rock
-        feed(d, ["open"], start=1.0)
+        hold_pose(d, sender, "rock", 1.1)                    # 已經開始調了
+        self.assertEqual(sender.fired, ["volume_down"])
+        hold_pose(d, sender, "open", 1.0, start=1.2)         # 放掉 rock
         self.assertEqual(sender.fired, ["volume_down"])
         self.assertIsNone(d.repeat_at)
 
     def test_toggling_the_pinch_switches_volume_direction(self) -> None:
-        """rock 捏一下放一下 = 音量上下切換，不用回中立 (中間 token 變了 = 新的觸發)。"""
+        """調小 → 捏合 → 調大，不用中間回中立 (但各自要撐滿 --action-hold)。"""
         d, sender = make()
-        feed(d, ["rock", "rock+pinch", "rock"], step=0.05)
-        self.assertEqual(sender.fired, ["volume_down", "volume_up", "volume_down"])
+        hold_pose(d, sender, "rock", 1.1)                    # 開始調小
+        self.assertEqual(sender.fired, ["volume_down"])
+        hold_pose(d, sender, "rock+pinch", 1.5, start=1.2)   # 不用回中立，撐滿後改調大
+        self.assertEqual(sender.fired[0], "volume_down")
+        self.assertIn("volume_up", sender.fired)
 
     def test_repeat_does_not_need_rearming_but_the_first_press_does(self) -> None:
         """連發是同一次「按住」的延續，但第一次仍要通過 armed。"""
         d, sender = make()
         feed(d, ["open+pinch"], start=0.0)                   # 卸膛
-        feed(d, ["rock"], start=0.1)                         # 沒回中立 -> 不觸發
-        self.assertEqual(sender.fired, ["play_pause"])
-        feed(d, ["rock"], start=1.0)                         # 持續中也不會補觸發
+        hold_pose(d, sender, "rock", 3.0, start=0.1)         # 沒回中立 -> 撐再久也不觸發
         self.assertEqual(sender.fired, ["play_pause"])
 
     def test_send_failure_stops_the_repeat(self) -> None:
@@ -170,9 +206,8 @@ class DispatcherTests(unittest.TestCase):
         def boom(action):
             raise hotkeys.HotkeyError("UIPI")
 
-        feed(d, ["rock"], start=0.0)
         sender.fire = boom
-        feed(d, ["rock"], start=0.4)
+        hold_pose(d, sender, "rock", 1.5)
         self.assertIsNone(d.repeat_at)
 
     def test_stop_releases_modifiers(self) -> None:

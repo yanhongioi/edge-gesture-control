@@ -15,7 +15,8 @@
 #                 以上是「一次性動作」：比出來只送一次，要先回到中立姿勢才能再觸發
 #                 (中立 = 手掌張開沒捏 / 握拳 / 手移出畫面)。--action-map 可以改對應
 #   rock + 捏合    音量加大        rock  音量減小
-#                 音量是「連發動作」：比著不放會持續調整 (一次按鍵只動 2%，不連發調不動)
+#                 音量是「連發動作」：穩定比著 --action-hold 秒後開始，之後每
+#                 --action-repeat 秒調一階 (一次按鍵只動 2%，不連發調不動)
 #   open / fist / 其他  不動作 (open 沒捏是起手式兼中立；fist 是拿刀具時的手，永遠不能觸發)
 #
 #   捏合判斷在板子上 (board/gesture.py 的 PinchDetector)，這裡用 MQTT 的 hands[].pinch
@@ -377,7 +378,8 @@ class GestureActionDispatcher:
         self.last = None
         self.armed = True
         self.cooldown_until = 0.0
-        self.repeat_at = None            # 下一次連發的時間 (None = 這個姿勢不連發)
+        self.repeat_at = None            # 下一次送出的時間 (None = 這個姿勢不是連發動作)
+        self.repeating = False           # 已經開始連發 (第一次已經送出去了)
         self.last_repeat = False         # 上一個送出的動作是不是連發動作 (音量上下互切用)
 
     def _fire(self, token, action, repeat=False):
@@ -398,17 +400,17 @@ class GestureActionDispatcher:
         self.last = token
         if token in NEUTRAL_TOKENS:
             self.armed = True
-            self.repeat_at = None
+            self.repeat_at, self.repeating = None, False
             self.last_repeat = False
             return
         action = self.action_map.get(token)
         if action is None:
-            self.repeat_at = None
+            self.repeat_at, self.repeating = None, False
             return
         repeats = action in hotkeys.REPEAT_ACTIONS
 
         if changed:                      # 新的觸發
-            self.repeat_at = None
+            self.repeat_at, self.repeating = None, False
             # 連發動作之間可以直接互換 (音量調小 → 捏合 → 調大)，不用中間先回中立：
             # 兩邊都是同一類的連續調整，硬要張開手掌再比一次很不合手。
             # 要切到一次性動作 (播放/暫停、切視窗) 仍然必須回中立，避免手勢過渡時誤觸。
@@ -416,22 +418,30 @@ class GestureActionDispatcher:
                 return
             if t < self.cooldown_until and not (repeats and self.last_repeat):
                 return
-            if not self._fire(token, action):
+            if repeats:
+                # 連發動作先不送：要穩定比著 --action-hold 秒才開始調整。
+                # 手在換姿勢的過程中常被判成別的手勢一兩幀，沒有這道就會被瞬間掃過去的
+                # rock 調掉音量。姿勢中途變掉 (包括捏合狀態變了) 就重新計時。
+                self.repeat_at = t + self.args.action_hold
                 return
             self.armed = False
-            self.last_repeat = repeats
-            if repeats:
-                # 連發動作不設 cooldown：連發速率由 --action-repeat 管，
-                # 手勢抖一下最多讓音量多走一階，沒有危害
-                self.repeat_at = t + self.args.action_repeat_delay
-            else:
-                self.cooldown_until = t + self.args.action_cooldown
+            self.last_repeat = False
+            self.cooldown_until = t + self.args.action_cooldown
+            self._fire(token, action)
             return
 
         # 同一個姿勢持續中：只有連發動作會繼續送
-        if self.repeat_at is not None and t >= self.repeat_at:
-            self.repeat_at = (t + self.args.action_repeat
-                              if self._fire(token, action, repeat=True) else None)
+        if self.repeat_at is None or t < self.repeat_at:
+            return
+        first = not self.repeating
+        if not self._fire(token, action, repeat=not first):
+            self.repeat_at = None        # 送不出去就別再連發下去
+            return
+        if first:                        # 撐過 --action-hold，正式開始調整
+            self.armed = False
+            self.repeating = True
+            self.last_repeat = True
+        self.repeat_at = t + self.args.action_repeat
 
     def stop(self):
         """收尾：確保沒有修飾鍵卡在按住的狀態 (見 hotkeys.py 的說明)"""
@@ -517,11 +527,12 @@ def main():
                         + "、".join(f"{n} {label}" for n, label in hotkeys.iter_actions()))
     g.add_argument("--action-cooldown", type=float, default=1.0,
                    help="送出一次快捷鍵後，幾秒內不再送 (預設 1.0)")
-    g.add_argument("--action-repeat-delay", type=float, default=0.4,
-                   help="連發動作 (音量) 比出來多久後開始連發 (預設 0.4 秒)")
-    g.add_argument("--action-repeat", type=float, default=0.10,
-                   help="連發動作每隔幾秒送一次 (預設 0.10 = 每秒 10 次；"
-                        "Windows 音量一次 2%%，約每秒 20%%，全音域約 5 秒)")
+    g.add_argument("--action-hold", type=float, default=1.0,
+                   help="連發動作 (音量) 要穩定比著幾秒才開始調整 (預設 1.0)；"
+                        "中途手勢變掉就重新計時，手勢過渡時掃過去不會誤調")
+    g.add_argument("--action-repeat", type=float, default=0.25,
+                   help="連發動作每隔幾秒送一次 (預設 0.25 = 每秒 4 次；"
+                        "Windows 音量一次 2%%，約每秒 8%%)")
     g.add_argument("--no-actions", action="store_true", help="關閉所有快捷鍵")
     ap.add_argument("--stale", type=float, default=0.5, help="超過幾秒沒收到資料就停止動作")
     ap.add_argument("--dry-run", action="store_true", help="只印出動作，不真的控制電腦")
