@@ -9,7 +9,7 @@
 #   sh run_voice.sh --no-notify  # 只印在畫面上，不送 MQTT
 #   sh run_voice.sh stop         # 停止
 #   sh run_voice.sh restore      # 停止，並把 /etc/asound.conf 和 AFE 的 Config.ini 還原
-# 環境變數：MQTT_HOST (預設 192.168.7.1)、MIC_GAIN (C270 麥克風增益 0~16，預設 8；16 會爆音)
+# 環境變數：MQTT_HOST (預設 192.168.7.1；多台用逗號分開)、MIC_GAIN (C270 麥克風增益 0~16，預設 8；16 會爆音)
 # --------------------------------------------------------------------------------------
 
 DIR=$(cd "$(dirname "$0")" && pwd)
