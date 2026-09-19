@@ -418,7 +418,8 @@ C270 640×480
 **之後再做**
 
 - [x] 伺服馬達 MG996R 可以用硬體 PWM 控制（pin 33 = `pwmchip1` channel 2），`board/servo.py`
-- [ ] 語音：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），**待上板測試**
+- [x] 語音喚醒詞：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），2026-09-19 上板實測：HEY NXP 5/5、NEXT 3 次都抓到（說不清楚的指令 = UNKNOWN）。和隊友的 `audio_stream.py`（`hw:1,0`）搶同一顆麥克風，不能同時跑
+- [ ] 語音：VIT 喚醒 → MQTT `edge/voice` → PC 的 voice_app 開始聽下一句（Whisper + 本地 LLM）
 - [ ] 雲台持續追人（人物定位、馬達控制都有了，剩下把 `dx` 接到馬達：把 `dx` 拉回 0）。設計（2026-09-17 決定）：
   - **人物偵測**：`detect_ssdmobilenetv3_quant`（來自 MobileNetSSD_VehicleHumanDetector）。正面、側面、背面都偵測得到，用人物框中心的 x 算雲台要轉的角度，讓人保持在畫面中央。
   - **手勢**：在這個穩定的畫面裡持續跑，不是兩種模式輪流切換。三個模型輪流使用 NPU，各自的 SRAM 都在 384 KB 以內，不會衝突。
