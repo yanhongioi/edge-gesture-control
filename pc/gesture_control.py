@@ -452,15 +452,15 @@ def main():
                    help="捏下後游標先停住幾秒 (這段時間內放開 = 原地點擊)")
     g.add_argument("--release-settle", type=float, default=0.1, help="放開後游標停住幾秒")
     g = ap.add_argument_group("捲動 (two)")
-    g.add_argument("--scroll-base", type=float, default=240,
-                   help="基本捲動速度 (每秒滾輪單位，120 = 一格；預設 240 = 每秒 2 格)")
-    g.add_argument("--scroll-gain", type=float, default=6000,
+    g.add_argument("--scroll-base", type=float, default=120,
+                   help="基本捲動速度 (每秒滾輪單位，120 = 一格；預設 120 = 每秒 1 格)")
+    g.add_argument("--scroll-gain", type=float, default=3000,
                    help="加速：往捲動方向推離起點 (畫面高度比例) × 這個值 = 額外的每秒滾輪單位"
-                        " (預設 6000 = 推離 10% 畫面高度多加每秒 5 格)")
+                        " (預設 3000 = 推離 10% 畫面高度多加每秒 1.25 格)")
     g.add_argument("--scroll-dead", type=float, default=0.05,
                    help="推離起點多少比例以內不加速 (越大越不容易手一抖就加速)")
-    g.add_argument("--scroll-max", type=float, default=1800,
-                   help="最快每秒幾個滾輪單位 (預設 1800 = 每秒 15 格)")
+    g.add_argument("--scroll-max", type=float, default=1200,
+                   help="最快每秒幾個滾輪單位 (預設 1200 = 每秒 10 格)")
     g.add_argument("--scroll-hold", type=float, default=0.5,
                    help="手或手勢短暫不見時，繼續用原本速度捲幾秒 (起點不重算)")
     g.add_argument("--scroll-invert", action="store_true", help="上下反過來")
