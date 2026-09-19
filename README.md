@@ -9,6 +9,7 @@
 | `README.md`（本頁） | 專案概覽、**指令區（每天用的指令）**、板子目前狀態與進度 |
 | [docs/setup.md](docs/setup.md) | 從零開始的上板教學：接線、登入、網路、跑模型、疑難排解 |
 | [docs/plan.md](docs/plan.md) | 專案構想、分工、demo 腳本 |
+| [docs/benchmark.md](docs/benchmark.md) | 板子效能實測指令：NPU vs CPU、FPS、系統資源、eIQ AI Hub 對照 |
 
 ## 目錄結構
 
@@ -490,6 +491,7 @@ C270 640×480
   $B --graph=$M/hand_detect_20000_quant.tflite --num_threads=2 --num_runs=50                                                # CPU
   ```
   結果看最後的 `Inference (avg)`（微秒）。NPU 運算比例來自 `models/*_vela_report.txt` 的 `NPU operators`。
+  完整步驟見 [docs/benchmark.md](docs/benchmark.md)。
 - NPU 分工：偵測模型的後處理（`TFLite_Detection_PostProcess`）在 CPU 上跑，骨架模型的輸入輸出量化轉換在 CPU 上跑，其餘都在 NPU。
 
 ### 已知問題
