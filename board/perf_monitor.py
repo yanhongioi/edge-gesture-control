@@ -9,10 +9,10 @@
 #   1. hand_cam.py 的輸出要存一份 log 給這支讀 (-u = 不要緩衝，log 才會即時更新)：
 #        python3 -u hand_cam.py --mqtt 192.168.7.1 --mqtt-hz 30 | tee /tmp/hand_cam.log
 #   2. 其他 demo 程式照常開 (語音、audio_stream…)
-#   3. 另一個 SSH 視窗：
-#        python3 perf_monitor.py                     # 量 60 秒
-#        python3 perf_monitor.py -d 120 --csv /tmp/perf.csv
-#      Ctrl+C 可以提早結束 (一樣會印摘要)
+#   3. 另一個 SSH 視窗 (實測開始時啟動，結束時按 Ctrl+C → 印出摘要)：
+#        python3 perf_monitor.py --csv /tmp/perf.csv
+#        python3 perf_monitor.py -d 120              # 或固定量 120 秒後自己停
+#      --csv 是邊量邊寫，SSH 中途斷線也不會丟掉已經量到的數據
 # --------------------------------------------------------------------------------------
 
 import os
@@ -161,7 +161,8 @@ def stats(values):
 
 def main():
     ap = argparse.ArgumentParser(description="demo 全開時的板子效能監測")
-    ap.add_argument("-d", "--duration", type=float, default=60, help="量幾秒 (預設 60)")
+    ap.add_argument("-d", "--duration", type=float, default=0,
+                    help="量幾秒後自己停；0 = 一直量到按 Ctrl+C (預設)")
     ap.add_argument("-i", "--interval", type=float, default=1.0, help="取樣間隔秒數")
     ap.add_argument("--hand-log", default="/tmp/hand_cam.log", help="hand_cam.py 輸出的 log")
     ap.add_argument("--csv", default="", help="每秒的原始數據存成 CSV")
@@ -182,12 +183,23 @@ def main():
                 prev_proc[p] = r[0]
     cores = sorted(prev_cpu)
     t_prev = t0 = time.monotonic()
-    print(f"量測 {args.duration:.0f} 秒 (Ctrl+C 提早結束)。追蹤中的程式：" +
+    how_long = f"量 {args.duration:.0f} 秒 (Ctrl+C 提早結束)" if args.duration > 0 else "開始量測，按 Ctrl+C 結束"
+    print(f"{how_long}。追蹤中的程式：" +
           (", ".join(f"{n}({len(p)})" for n, p in pids.items()) or "無"))
     if not os.path.exists(args.hand_log):
         print(f"注意：找不到 {args.hand_log}，不會有 FPS / NPU 數據 (hand_cam.py 要用 | tee {args.hand_log} 啟動)")
 
-    while not stop and time.monotonic() - t0 < args.duration:
+    csv_keys = (["t"] + [f"{c}%" for c in cores] + ["cpu_avg%"] +
+                [f"{n} {u}" for n, _ in WATCH for u in ("cpu%", "MB")] +
+                ["mem_avail_MB", "temp_C", "load1"] +
+                [f"{n} {d} KB/s" for n in NETS for d in ("rx", "tx")] +
+                ["fps", "npu_ms/frame", "npu_busy%"])
+    csv_file = None
+    if args.csv:
+        csv_file = open(args.csv, "w", buffering=1)          # 一行一行寫進去
+        csv_file.write(",".join(csv_keys) + "\n")
+
+    while not stop and (args.duration <= 0 or time.monotonic() - t0 < args.duration):
         time.sleep(args.interval)
         now = time.monotonic()
         dt = now - t_prev
@@ -224,6 +236,9 @@ def main():
             fps, per_frame, busy, _ = hand.samples[-1]
             row["fps"], row["npu_ms/frame"], row["npu_busy%"] = fps, per_frame, busy
         rows.append(row)
+        if csv_file:
+            csv_file.write(",".join("" if row.get(k) is None or row.get(k) != row.get(k)
+                                    else f"{row[k]:.2f}" for k in csv_keys) + "\n")
         prev_cpu, prev_net = cur_cpu, cur_net
         if not args.quiet:
             fps_txt = f"  FPS {row['fps']:4.1f}  NPU ~{row['npu_busy%']:3.0f}%" if "fps" in row else ""
@@ -231,15 +246,10 @@ def main():
                   " ".join(f"{row[f'{c}%']:3.0f}" for c in cores) +
                   f")  mem {row['mem_avail_MB']:5.0f} MB free  {row['temp_C']:4.1f}°C" + fps_txt)
 
+    if csv_file:
+        csv_file.close()
     if not rows:
         return
-    if args.csv:
-        keys = list(dict.fromkeys(k for r in rows for k in r))
-        with open(args.csv, "w") as f:
-            f.write(",".join(keys) + "\n")
-            for r in rows:
-                f.write(",".join("" if r.get(k) is None or r.get(k) != r.get(k) else f"{r[k]:.2f}"
-                                 for k in keys) + "\n")
 
     col = lambda k: [r[k] for r in rows if k in r]
     print(f"\n==================== 摘要 ({rows[-1]['t']:.0f} 秒，{len(rows)} 筆) ====================")

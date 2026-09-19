@@ -131,12 +131,15 @@ python3 /root/edge-gesture-control/board/audio_stream.py --device c270
 # PC：broker、gesture_control.py、voice_app.py --mqtt-wake (見 README)
 ```
 
-**② 板子 SSH #4：開始量**（量測期間照 demo 腳本操作：移動游標、點擊、捲動、喊 Hey NXP 下指令）
+**② 板子 SSH #4：實測開始時啟動，實測結束時按 Ctrl+C**（中間照 demo 腳本操作：移動游標、點擊、捲動、喊 Hey NXP 下指令）
 
 ```bash
 cd /root/edge-gesture-control/board
-python3 perf_monitor.py -d 120 --csv /tmp/perf.csv      # 量 120 秒；Ctrl+C 可提早結束
+python3 perf_monitor.py --csv /tmp/perf.csv      # 一直量到按 Ctrl+C，按下後印出摘要
+python3 perf_monitor.py -d 120 --csv /tmp/perf.csv   # 或固定量 120 秒後自己停
 ```
+
+- `--csv` 是邊量邊寫：SSH 中途斷線時摘要看不到，但 `/tmp/perf.csv` 裡已經量到的數據還在。
 
 **③ 看摘要**（例：2026-09-19，hand_cam `--port 0` + 語音 + audio_stream，沒有手在畫面上）
 
