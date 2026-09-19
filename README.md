@@ -476,14 +476,20 @@ C270 640×480
 
 ### 效能紀錄
 
-| 項目 | 板子 NPU 實測 | 備註 |
-| --- | --- | --- |
-| 手部偵測 `hand_detect_20000_quant` | 約 10 ms | 只在沒追到手時跑 |
-| 手部骨架 `hand_landmark_new_256x256_integer_quant` | 約 9.6 ms | 每隻手每幀一次 |
-| 人物偵測 `detect_ssdmobilenetv3_quant` | 約 9.2 ms | 每 5 幀一次，平均每幀約 2 ms |
-| `hand_cam.py` 即時（640×480，1 隻手，含串流） | 約 32～35 FPS | 舊版每幀都跑手部偵測時約 28 FPS；C270 本身最高 30 fps |
+| 項目 | NPU（Vela 版） | CPU（原始模型，2 執行緒） | 加速 | NPU 運算比例 | 備註 |
+| --- | --- | --- | --- | --- | --- |
+| 手部偵測 `hand_detect_20000_quant` | 9.9 ms | 70.7 ms | 7.2× | 98.4%（60/61） | 只在沒追到手時跑 |
+| 手部骨架 `hand_landmark_new_256x256_integer_quant` | 9.5 ms | 54.1 ms | 5.7× | 97.7%（171/175） | 每隻手每幀一次 |
+| 人物偵測 `detect_ssdmobilenetv3_quant` | 8.6 ms | 54.4 ms | 6.3× | 98.4%（60/61） | 每 5 幀一次，平均每幀約 2 ms |
+| `hand_cam.py` 即時（640×480，1 隻手，含串流） | 約 32～35 FPS | | | | 舊版每幀都跑手部偵測時約 28 FPS；C270 本身最高 30 fps |
 
-- CPU 對照：尚未量測，請用 setup.md 步驟 6 的 `benchmark_model` 量。
+- 量法（2026-09-19，TFLite 2.19，50 次平均）：
+  ```bash
+  B=/usr/bin/tensorflow-lite-2.19.0/examples/benchmark_model; M=/root/edge-gesture-control/board/models
+  $B --graph=$M/hand_detect_20000_quant_vela.tflite --external_delegate_path=/usr/lib/libethosu_delegate.so --num_runs=50   # NPU
+  $B --graph=$M/hand_detect_20000_quant.tflite --num_threads=2 --num_runs=50                                                # CPU
+  ```
+  結果看最後的 `Inference (avg)`（微秒）。NPU 運算比例來自 `models/*_vela_report.txt` 的 `NPU operators`。
 - NPU 分工：偵測模型的後處理（`TFLite_Detection_PostProcess`）在 CPU 上跑，骨架模型的輸入輸出量化轉換在 CPU 上跑，其餘都在 NPU。
 
 ### 已知問題
