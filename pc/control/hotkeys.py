@@ -74,6 +74,12 @@ ACTIONS: dict[str, tuple[tuple[KeyEvent, ...], str]] = {
 }
 
 
+# 「按住會連發」的動作：一次按鍵的幅度太小 (Windows 音量一次只動 2%)，
+# 要像鍵盤的音量鍵一樣按住持續調整才用得動。其餘動作都是按一下就好 —— 播放/暫停
+# 連發等於沒按，Alt+Tab 連發會在兩個視窗之間狂跳。
+REPEAT_ACTIONS = frozenset({"volume_up", "volume_down"})
+
+
 def describe(action: str) -> str:
     """動作的中文說明；未知動作回傳原名。"""
     entry = ACTIONS.get(action)

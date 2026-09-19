@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import unittest
 
+from pc.control import hotkeys
 from pc.gesture_control import (
     DEFAULT_ACTION_MAP,
     GestureActionDispatcher,
@@ -26,9 +27,11 @@ class FakeSender:
         self.released += 1
 
 
-def make(cooldown: float = 0.0, action_map=None):
+def make(cooldown: float = 0.0, action_map=None, repeat_delay: float = 0.4,
+         repeat: float = 0.15):
     args = argparse.Namespace(action_map=dict(action_map or DEFAULT_ACTION_MAP),
-                              action_cooldown=cooldown, dry_run=True)
+                              action_cooldown=cooldown, action_repeat_delay=repeat_delay,
+                              action_repeat=repeat, dry_run=True)
     sender = FakeSender()
     return GestureActionDispatcher(args, sender=sender), sender
 
@@ -97,7 +100,7 @@ class DispatcherTests(unittest.TestCase):
 
     def test_unmapped_and_reserved_gestures_do_nothing(self) -> None:
         d, sender = make()
-        feed(d, ["point", "point+pinch", "two", "three", "six", "rock", "ok", "four", "fist"])
+        feed(d, ["point", "point+pinch", "two", "three", "six", "ok", "four", "fist"])
         self.assertEqual(sender.fired, [])
 
     def test_pointing_and_clicking_never_fires_a_hotkey(self) -> None:
@@ -112,6 +115,65 @@ class DispatcherTests(unittest.TestCase):
         d, sender = make(action_map={"fist": "play_pause"})
         feed(d, ["fist"] * 10)
         self.assertEqual(sender.fired, [])
+
+    def test_volume_repeats_while_held(self) -> None:
+        """音量是連發動作：比著 rock 不放，每隔 --action-repeat 秒再送一次。"""
+        d, sender = make(repeat_delay=0.4, repeat=0.15)
+        feed(d, ["rock"], start=0.0)
+        self.assertEqual(sender.fired, ["volume_down"])      # 第一次
+        feed(d, ["rock"] * 10, start=0.03, step=0.03)        # 到 0.30，還沒到連發延遲
+        self.assertEqual(sender.fired, ["volume_down"])
+        # 0.33 ~ 0.99 每 30ms 一幀 (板子送 30 Hz)：0.4 開始連發，之後每 0.15 秒一次
+        feed(d, ["rock"] * 23, start=0.33, step=0.03)
+        self.assertEqual(sender.fired, ["volume_down"] * 5)
+
+    def test_pinched_rock_repeats_volume_up(self) -> None:
+        d, sender = make()
+        feed(d, ["rock+pinch"] * 30, step=0.03)              # 0.87 秒
+        self.assertEqual(sender.fired, ["volume_up"] * 5)
+
+    def test_one_shot_actions_never_repeat(self) -> None:
+        """播放/暫停連發等於沒按，Alt+Tab 連發會在兩個視窗之間狂跳。"""
+        d, sender = make()
+        feed(d, ["open+pinch"] * 50, step=0.1)
+        self.assertEqual(sender.fired, ["play_pause"])
+        d2, sender2 = make()
+        feed(d2, ["thumbs_up"] * 50, step=0.1)
+        self.assertEqual(sender2.fired, ["alt_tab"])
+
+    def test_releasing_the_gesture_stops_the_repeat(self) -> None:
+        d, sender = make()
+        feed(d, ["rock"], start=0.0)
+        feed(d, ["open"], start=0.4)                         # 放掉 rock
+        feed(d, ["open"], start=1.0)
+        self.assertEqual(sender.fired, ["volume_down"])
+        self.assertIsNone(d.repeat_at)
+
+    def test_toggling_the_pinch_switches_volume_direction(self) -> None:
+        """rock 捏一下放一下 = 音量上下切換，不用回中立 (中間 token 變了 = 新的觸發)。"""
+        d, sender = make()
+        feed(d, ["rock", "rock+pinch", "rock"], step=0.05)
+        self.assertEqual(sender.fired, ["volume_down", "volume_up", "volume_down"])
+
+    def test_repeat_does_not_need_rearming_but_the_first_press_does(self) -> None:
+        """連發是同一次「按住」的延續，但第一次仍要通過 armed。"""
+        d, sender = make()
+        feed(d, ["open+pinch"], start=0.0)                   # 卸膛
+        feed(d, ["rock"], start=0.1)                         # 沒回中立 -> 不觸發
+        self.assertEqual(sender.fired, ["play_pause"])
+        feed(d, ["rock"], start=1.0)                         # 持續中也不會補觸發
+        self.assertEqual(sender.fired, ["play_pause"])
+
+    def test_send_failure_stops_the_repeat(self) -> None:
+        d, sender = make()
+
+        def boom(action):
+            raise hotkeys.HotkeyError("UIPI")
+
+        feed(d, ["rock"], start=0.0)
+        sender.fire = boom
+        feed(d, ["rock"], start=0.4)
+        self.assertIsNone(d.repeat_at)
 
     def test_stop_releases_modifiers(self) -> None:
         d, sender = make()
@@ -153,6 +215,32 @@ class ActionMapParsingTests(unittest.TestCase):
     def test_rejects_malformed_pairs(self) -> None:
         with self.assertRaises(argparse.ArgumentTypeError):
             parse_action_map("thumbs_up")
+
+
+
+class HelpTests(unittest.TestCase):
+    """--help 不在任何其他測試的路徑上，但它是使用者第一個會下的指令。"""
+
+    def test_help_renders(self) -> None:
+        """argparse 會對 help 字串做 % 格式化，裸的 % 會在 --help 時才爆掉
+        (例如「推離 10% 畫面高度」)，程式其餘部分完全正常，所以只有這裡抓得到。"""
+        import contextlib
+        import io as _io
+
+        from pc import gesture_control
+
+        buf = _io.StringIO()
+        with contextlib.redirect_stdout(buf), self.assertRaises(SystemExit):
+            gesture_control.main.__globals__  # 確保模組載入
+            import sys
+            argv = sys.argv
+            sys.argv = ["gesture_control.py", "--help"]
+            try:
+                gesture_control.main()
+            finally:
+                sys.argv = argv
+        self.assertIn("--action-map", buf.getvalue())
+
 
 
 if __name__ == "__main__":

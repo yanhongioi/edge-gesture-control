@@ -12,8 +12,10 @@
 #                 一比出 two 就會開始捲，沒有「停在原地」的狀態 —— 要停就別比 two
 #   open + 捏合    播放/暫停 (張開手掌再捏一下；放開手掌就能再捏一次)
 #   thumbs_up     切換視窗 (Alt+Tab)
-#                 這兩個是「一次性動作」：比出來只送一次，要先回到中立姿勢才能再觸發
+#                 以上是「一次性動作」：比出來只送一次，要先回到中立姿勢才能再觸發
 #                 (中立 = 手掌張開沒捏 / 握拳 / 手移出畫面)。--action-map 可以改對應
+#   rock + 捏合    音量加大        rock  音量減小
+#                 音量是「連發動作」：比著不放會持續調整 (一次按鍵只動 2%，不連發調不動)
 #   open / fist / 其他  不動作 (open 沒捏是起手式兼中立；fist 是拿刀具時的手，永遠不能觸發)
 #
 #   捏合判斷在板子上 (board/gesture.py 的 PinchDetector)，這裡用 MQTT 的 hands[].pinch
@@ -57,7 +59,8 @@ PINCH_SUFFIX = "+pinch"
 # 中立 token：看到其中之一才會重新「上膛」，同一個姿勢維持著不會連發。
 # open 沒捏 = 起手式；fist 按設計永遠不觸發任何動作 (拿刀具的手)；手不見 = None。
 NEUTRAL_TOKENS = (None, "open", "fist")
-DEFAULT_ACTION_MAP = {"open" + PINCH_SUFFIX: "play_pause", "thumbs_up": "alt_tab"}
+DEFAULT_ACTION_MAP = {"open" + PINCH_SUFFIX: "play_pause", "thumbs_up": "alt_tab",
+                      "rock" + PINCH_SUFFIX: "volume_up", "rock": "volume_down"}
 # board/gesture.py classify_landmarks() 會回傳的全部手勢
 KNOWN_GESTURES = ("point", "two", "three", "four", "six", "rock", "ok", "open", "fist",
                   "thumbs_up")
@@ -348,13 +351,20 @@ def gesture_token(hand):
 
 
 class GestureActionDispatcher:
-    """一次性快捷鍵 (播放/暫停、切視窗)。和 point/two 的「連續模式」不同：
-    只在『token 改變』的那一瞬間送一次，不是每幀送。
+    """快捷鍵。和 point/two 的「連續模式」不同：在『token 改變』的那一瞬間送，不是每幀送。
 
-    防連發有兩道，缺一不可：
+    兩種動作 (哪些會連發見 hotkeys.REPEAT_ACTIONS)：
+      一次性 (播放/暫停、切視窗)  比出來只送一次，要先回到中立姿勢才能再送
+      連發   (音量+/-)            比出來先送一次，持續比著就每隔 --action-repeat 秒再送一次
+                                 Windows 音量一次只動 2%，不連發根本調不動
+
+    一次性動作的防連發有兩道，缺一不可：
       armed  觸發後就「卸膛」，要先看到中立 token (open 沒捏 / fist / 手不見) 才會重新上膛。
              沒有這個的話，捏著不放 = 音樂瘋狂 play/pause。
       cooldown  擋住 open+pinch → open → open+pinch 這種一瞬間的抖動 (中間的 open 會重新上膛)。
+
+    連發動作的第一次也要通過這兩道 (所以 rock → thumbs_up 不會直接觸發，跟以前一樣)，
+    但之後的連發不再檢查 —— 那是同一次「按住」的延續，不是新的觸發。
 
     open / open+pinch 這組搭配得剛好：張開手掌是中立，捏一下觸發，放開就自動重新上膛。
 
@@ -367,26 +377,61 @@ class GestureActionDispatcher:
         self.last = None
         self.armed = True
         self.cooldown_until = 0.0
+        self.repeat_at = None            # 下一次連發的時間 (None = 這個姿勢不連發)
+        self.last_repeat = False         # 上一個送出的動作是不是連發動作 (音量上下互切用)
 
-    def update(self, hand, t):
-        token = gesture_token(hand)
-        if token == self.last:
-            return                       # 同一個姿勢持續中，不重複觸發
-        self.last = token
-        if token in NEUTRAL_TOKENS:
-            self.armed = True
-            return
-        action = self.action_map.get(token)
-        if action is None or not self.armed or t < self.cooldown_until:
-            return
-        self.armed = False
-        self.cooldown_until = t + self.args.action_cooldown
+    def _fire(self, token, action, repeat=False):
+        """送出動作；回傳是否成功 (失敗就不要再連發下去)"""
         try:
             label = self.sender.fire(action)
         except hotkeys.HotkeyError as exc:
             print(f"  ※ {token} → {action} 失敗：{exc}")
+            return False
+        if not repeat:                   # 連發不逐次印，不然畫面會被洗版
+            print(f"  ★ {token} → {label}"
+                  + ("  [dry-run，沒有真的送出]" if self.args.dry_run else ""))
+        return True
+
+    def update(self, hand, t):
+        token = gesture_token(hand)
+        changed = token != self.last
+        self.last = token
+        if token in NEUTRAL_TOKENS:
+            self.armed = True
+            self.repeat_at = None
+            self.last_repeat = False
             return
-        print(f"  ★ {token} → {label}" + ("  [dry-run，沒有真的送出]" if self.args.dry_run else ""))
+        action = self.action_map.get(token)
+        if action is None:
+            self.repeat_at = None
+            return
+        repeats = action in hotkeys.REPEAT_ACTIONS
+
+        if changed:                      # 新的觸發
+            self.repeat_at = None
+            # 連發動作之間可以直接互換 (音量調小 → 捏合 → 調大)，不用中間先回中立：
+            # 兩邊都是同一類的連續調整，硬要張開手掌再比一次很不合手。
+            # 要切到一次性動作 (播放/暫停、切視窗) 仍然必須回中立，避免手勢過渡時誤觸。
+            if not self.armed and not (repeats and self.last_repeat):
+                return
+            if t < self.cooldown_until and not (repeats and self.last_repeat):
+                return
+            if not self._fire(token, action):
+                return
+            self.armed = False
+            self.last_repeat = repeats
+            if repeats:
+                # 連發動作不設 cooldown：連發速率由 --action-repeat 管，
+                # 手勢抖一下最多讓音量多走一階，沒有危害
+                self.repeat_at = t + self.args.action_repeat_delay
+            else:
+                self.cooldown_until = t + self.args.action_cooldown
+            return
+
+        # 同一個姿勢持續中：只有連發動作會繼續送
+        if self.repeat_at is not None and t >= self.repeat_at:
+            self.repeat_at = (t + self.args.action_repeat
+                              if self._fire(token, action, repeat=True) else None)
 
     def stop(self):
         """收尾：確保沒有修飾鍵卡在按住的狀態 (見 hotkeys.py 的說明)"""
@@ -456,7 +501,7 @@ def main():
                    help="基本捲動速度 (每秒滾輪單位，120 = 一格；預設 120 = 每秒 1 格)")
     g.add_argument("--scroll-gain", type=float, default=3000,
                    help="加速：往捲動方向推離起點 (畫面高度比例) × 這個值 = 額外的每秒滾輪單位"
-                        " (預設 3000 = 推離 10% 畫面高度多加每秒 1.25 格)")
+                        " (預設 3000 = 推離 10%% 畫面高度多加每秒 1.25 格)")
     g.add_argument("--scroll-dead", type=float, default=0.05,
                    help="推離起點多少比例以內不加速 (越大越不容易手一抖就加速)")
     g.add_argument("--scroll-max", type=float, default=1200,
@@ -472,6 +517,11 @@ def main():
                         + "、".join(f"{n} {label}" for n, label in hotkeys.iter_actions()))
     g.add_argument("--action-cooldown", type=float, default=1.0,
                    help="送出一次快捷鍵後，幾秒內不再送 (預設 1.0)")
+    g.add_argument("--action-repeat-delay", type=float, default=0.4,
+                   help="連發動作 (音量) 比出來多久後開始連發 (預設 0.4 秒)")
+    g.add_argument("--action-repeat", type=float, default=0.10,
+                   help="連發動作每隔幾秒送一次 (預設 0.10 = 每秒 10 次；"
+                        "Windows 音量一次 2%%，約每秒 20%%，全音域約 5 秒)")
     g.add_argument("--no-actions", action="store_true", help="關閉所有快捷鍵")
     ap.add_argument("--stale", type=float, default=0.5, help="超過幾秒沒收到資料就停止動作")
     ap.add_argument("--dry-run", action="store_true", help="只印出動作，不真的控制電腦")
