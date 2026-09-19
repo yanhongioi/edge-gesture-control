@@ -117,7 +117,8 @@ python3 hand_cam.py --mqtt 192.168.7.1 --mqtt-hz 30
 | `two`（食指 + 中指） | 捲動：**手指指向上 = 往上捲，指向下 = 往下捲**（橫的 = 暫停）。基本速度每秒約 3 格；手再往手指的方向推離起點（比出 `two` 那一刻的手掌高度）越遠，捲得越快。手或手勢短暫不見 0.5 秒以內，會用原本的速度繼續捲，起點不重算 |
 | `open` | 不動作（起手式：站遠時先張開手掌舉到臉旁邊，讓系統找到手） |
 | `fist` | **永遠不動作**（拿刀、拿鍋鏟時的手） |
-| 其他（`three`、`four`、`six`、`rock`、`ok`、`thumbs_up`） | 還沒對應，之後有需要再加 |
+| `ok`（中指 + 無名指 + 小指伸直，食指收起來） | **在板子上**切換雲台要不要跟著人轉（不經過 MQTT，PC 端不處理）。比一次切一次 |
+| 其他（`three`、`four`、`six`、`rock`、`thumbs_up`） | 還沒對應，之後有需要再加 |
 
 ```powershell
 py -3.11 .\pc\gesture_control.py --anchor tip         # 游標改跟食指尖（預設 pip 第一節關節；mcp = 食指根部，更穩）
@@ -217,6 +218,8 @@ ping -c 1 pypi.org                     # 網址解析 (DNS) 正不正常
 v4l2-ctl --list-devices                # 鏡頭節點（C270 = /dev/video2）
 ls /dev/ethosu0                        # NPU 在不在
 python3 /root/edge-gesture-control/board/servo.py 90     # 雲台轉到 90 度（sweep = 掃一次；off = 放鬆）
+python3 /root/edge-gesture-control/board/hand_cam.py --servo   # 雲台追人（轉錯邊加 --servo-invert）
+python3 /root/edge-gesture-control/board/hand_cam.py --servo --servo-off  # 待命，比 ok 才開始追人
 arecord -l                             # 錄音裝置（C270 麥克風 = card WEBCAM）
 arecord -D plughw:CARD=WEBCAM,DEV=0 -f S16_LE -r 16000 -c 1 -d 5 -V mono /tmp/mic_test.wav   # 錄 5 秒測試
 python3 -m pip install <套件>          # 安裝 Python 套件（板子要能上網）
@@ -358,7 +361,7 @@ udhcpc -i mlan0
 
 ```text
 C270 640×480
- ├─ 人物偵測（每 5 幀一次）→ 挑最大的人 → 人物框、中心點、dx（之後給雲台用）
+ ├─ 人物偵測（每 5 幀一次）→ 挑最大的人 → 人物框、中心點、dx → 雲台（--servo）
  ├─ 手部追蹤（上一幀有手時）
  │    裁切框 = 上一幀骨架範圍 ×1.8 + 移動速度預測 → 骨架模型
  │    骨架分數 ≥ 0.55 → 繼續追；低於 0.55 → 算跟丟
@@ -419,11 +422,16 @@ C270 640×480
 
 - [x] 伺服馬達 MG996R 可以用硬體 PWM 控制（pin 33 = `pwmchip1` channel 2），`board/servo.py`
 - [ ] 語音：`board/voice/run_voice.sh`（NXP AFE + VIT，C270 複製成 4 聲道），**待上板測試**
-- [ ] 雲台持續追人（人物定位、馬達控制都有了，剩下把 `dx` 接到馬達：把 `dx` 拉回 0）。設計（2026-09-17 決定）：
+- [x] 雲台持續追人：`hand_cam.py --servo`（`PersonPanner` + `servo.Panner`），**待上板測試**。設計（2026-09-17 決定）：
   - **人物偵測**：`detect_ssdmobilenetv3_quant`（來自 MobileNetSSD_VehicleHumanDetector）。正面、側面、背面都偵測得到，用人物框中心的 x 算雲台要轉的角度，讓人保持在畫面中央。
   - **手勢**：在這個穩定的畫面裡持續跑，不是兩種模式輪流切換。三個模型輪流使用 NPU，各自的 SRAM 都在 384 KB 以內，不會衝突。
   - **游標座標**：改用「手相對於人物框」的位置，不受鏡頭轉動影響。
   - 舵機使用獨立電源。
+  - **控制方式**：定速 bang-bang + 遲滯，不是比例控制。`dx` 超過 `--servo-deadband`（0.15）就往那邊用 `--servo-speed`（25 度/秒）一直轉，轉到 `dx` 小於 `--servo-hold`（0.05）才停。兩個門檻不同是為了不要在門檻附近抖。
+  - **轉動在背景執行緒**（`servo.Panner`）：`servo.move_to()` 裡面會 sleep，直接在主迴圈呼叫會卡住影格。角度用「速度 × 經過秒數」累積，跟執行緒被排到的頻率無關。
+  - **方向**：`dx > 0` = 人在畫面右邊。角度要加還是要減看馬達怎麼裝 → `--servo-invert`；`--mirror` 時畫面已翻轉，程式會自動再反一次。
+  - 人不見或人物框太舊（超過 `--person-every` × 2 幀）就地停住，不亂轉去找人。
+  - **開關**：比一次 `ok` 手勢切換「要不要跟著人轉」（`--servo-toggle` 可換成別的手勢，空字串 = 關掉這功能）。只認手勢「第一次出現」那一下，一直比著不會連切；切換後 `--servo-toggle-cooldown`（1.5 秒）內不理會同一個手勢。關掉時馬達就地停住，不是回中。`--servo-off` = 開機先待命，比 `ok` 才開始追。
 
 ### 手部辨識調校紀錄（2026-09-17）
 
