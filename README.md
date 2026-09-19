@@ -25,7 +25,8 @@ edge-gesture-control/
 │   └── test_images/          # 單張圖片測試用（張開手掌、握拳、指東西）
 ├── pc/                       # 跑在 Windows 筆電
 │   ├── hand_listener.py      # 接收板子送來的資料並顯示 (MQTT edge/hand)，除錯用
-│   ├── gesture_control.py    # 收到手勢就控制這台電腦（point = 游標、捏合 = 點擊 / 拖曳、two = 捲動）
+│   ├── gesture_control.py    # 收到手勢就控制這台電腦（游標、捲動、播放/暫停、切視窗、音量）
+│   ├── control/hotkeys.py    # Windows 按鍵注入（SendInput）：媒體鍵、Alt+Tab、音量
 │   ├── mosquitto.conf        # MQTT broker 設定（允許外部連線）
 │   └── requirements.txt
 ├── scripts/
@@ -114,10 +115,13 @@ python3 hand_cam.py --mqtt 192.168.7.1 --mqtt-hz 30
 | --- | --- |
 | `point`（手槍姿勢：食指指出去，**拇指立起來**） | 游標跟著食指移動（預設跟第一節關節 `pip`，比指尖穩） |
 | `point` + **拇指壓下去碰食指側邊**（扣扳機 = 捏合） | 按住左鍵。快速捏一下 = 點擊；捏住不放再移動 = 拖曳；拇指立起來 = 放開 |
-| `two`（食指 + 中指） | 捲動：**手指指向上 = 往上捲，指向下 = 往下捲**（橫的 = 暫停）。基本速度每秒約 3 格；手再往手指的方向推離起點（比出 `two` 那一刻的手掌高度）越遠，捲得越快。手或手勢短暫不見 0.5 秒以內，會用原本的速度繼續捲，起點不重算 |
-| `open` | 不動作（起手式：站遠時先張開手掌舉到臉旁邊，讓系統找到手） |
+| `two`（食指 + 中指） | 捲動：**拇指捏下 = 往上捲，拇指放開 = 往下捲**。基本速度每秒 1 格；手再往捲動的方向推離起點（換方向時重算）越遠，捲得越快，最快每秒 10 格。手或手勢短暫不見 0.5 秒以內，會用原本的速度繼續捲，起點不重算。**一比出 `two` 就會開始捲，沒有「停在原地」的狀態** —— 要停就別比 `two` |
+| `open` + **捏合** | 播放/暫停（送媒體鍵 `VK_MEDIA_PLAY_PAUSE`）。張開手掌 → 捏一下 → 放開就能再捏一次 |
+| `four`（四指伸直，**拇指收攏貼手掌**） | 切換視窗（Alt+Tab，切回上一個視窗） |
+| `rock` + **捏合** / `rock`（食指 + 小指） | 音量加大 / 減小。**穩定比著 1 秒才開始**，之後每 0.25 秒一階（約每秒 8%） |
+| `open`（不捏） | 不動作（起手式：站遠時先張開手掌舉到臉旁邊，讓系統找到手；同時是快捷鍵的「中立姿勢」） |
 | `fist` | **永遠不動作**（拿刀、拿鍋鏟時的手） |
-| 其他（`three`、`four`、`six`、`rock`、`ok`、`thumbs_up`） | 還沒對應，之後有需要再加 |
+| 其他（`three`、`six`、`ok`、`thumbs_up`） | 還沒對應，`--action-map` 可以自己綁 |
 
 ```powershell
 py -3.11 .\pc\gesture_control.py --anchor tip         # 游標改跟食指尖（預設 pip 第一節關節；mcp = 食指根部，更穩）
@@ -129,9 +133,14 @@ py -3.11 .\pc\gesture_control.py --min-cutoff 0.3     # 游標更穩但更黏（
 py -3.11 .\pc\gesture_control.py --beta 0.1           # 快速移動時更跟手（預設 0.05）
 py -3.11 .\pc\gesture_control.py --press-settle 0.3   # 捏下後停久一點，點擊比較不會變成拖曳（預設 0.2 秒）
 py -3.11 .\pc\gesture_control.py --no-click           # 關掉捏合點擊，只移動游標
-py -3.11 .\pc\gesture_control.py --scroll-base 600    # 基本捲動速度快一點（預設 360 = 每秒 3 格）
-py -3.11 .\pc\gesture_control.py --scroll-gain 20000  # 推離起點時加速更多（預設 12000）；--scroll-invert 上下反過來
+py -3.11 .\pc\gesture_control.py --scroll-base 240    # 基本捲動速度快一點（預設 120 = 每秒 1 格）
+py -3.11 .\pc\gesture_control.py --scroll-gain 6000   # 推離起點時加速更多（預設 3000）；--scroll-invert 上下反過來
 py -3.11 .\pc\gesture_control.py --scroll-hold 1.0    # 掉幀時繼續捲久一點（預設 0.5 秒）
+py -3.11 .\pc\gesture_control.py --action-hold 1.5    # 音量要比更久才開始調（預設 1.0 秒）
+py -3.11 .\pc\gesture_control.py --action-repeat 0.4  # 音量調慢一點（預設 0.25 秒一階）
+py -3.11 .\pc\gesture_control.py --action-map "open+pinch=play_pause,four=alt_tab,rock+pinch=volume_up,rock=volume_down"
+                                                      # 自己綁快捷鍵（整組覆寫；動作清單見 --help）
+py -3.11 .\pc\gesture_control.py --no-actions         # 只留游標和捲動，關掉所有快捷鍵
 py -3.11 .\pc\gesture_control.py --no-mirror          # 板子有加 --mirror 時要加
 py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
 ```
@@ -148,7 +157,13 @@ py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
   - **`--prefreeze` 要配合校準**：如果拇指放輕鬆時的比例本來就低於 0.40，游標會一直被鎖住，這時要把它調低。
 - **按下後**：游標停 0.2 秒，這段時間內放開就是原地點擊。
 - **游標要跟哪個點**（`--anchor`）：指尖在手指最末端，最會晃；`pip`（第一節關節）、`mcp`（根部）比較穩，拇指壓下時也比較不會被帶動。實測 `pip` 點擊比較準，所以是預設值。
-- **`two` 朝下**：手指朝下時手部偵測比較難一開始就找到手，建議先比朝上的 `two`（或張開手掌）讓系統找到手，追蹤開始後再翻成朝下。
+- **為什麼捲動方向看拇指**：早期版本用「手指指向上 / 指向下」決定方向，要換方向得把手腕整個翻過來，而且手指朝下時偵測本來就比較難找到手。改看捏合之後，兩個方向都維持同一個舒服的手勢，換方向只動拇指。代價是沒有「停在原地」的狀態（拇指只有兩種狀態），要停就放下 `two`。
+- **快捷鍵分兩類**（`pc/control/hotkeys.py`）：
+  - **一次性**（播放/暫停、切視窗）：比出來只送一次，要先回到中立姿勢（手掌張開沒捏 / 握拳 / 手移出畫面）才能再觸發。沒有這道的話，捏著不放 = 音樂瘋狂 play/pause。
+  - **連發**（音量）：Windows 音量一次按鍵只動 2%，不連發根本調不動。所以改成「穩定比著 1 秒才開始，之後每 0.25 秒一階」—— 前 1 秒完全不送按鍵，手在換姿勢過程中被判成 `rock` 幾幀不會誤調音量。音量上下可以直接互切（不用回中立），但切到一次性動作仍然要回中立。
+- **播放/暫停不看前景視窗**：媒體鍵由 Windows 轉成 `WM_APPCOMMAND`，交給目前的媒體 session（SMTC），所以比手勢時焦點在哪都沒關係。副作用是同時開 YouTube 和 Spotify 時會送到「最後播放的那個」。
+- **Alt+Tab 的四個按鍵事件放在同一次 `SendInput`**：Alt 按下去之後如果 Tab 沒送成，系統會停在「Alt 一直按著」的狀態，之後每個按鍵都變成選單快速鍵。一次送整個陣列是原子的，中間插不進別的輸入；程式結束時還會再補送一次「放開所有修飾鍵」。
+  - 前景視窗如果是以**系統管理員**身分執行的，按鍵注入會被 UIPI 整個丟掉，而且沒有任何錯誤提示。這時 `gesture_control.py` 也要用系統管理員身分跑。
 - **游標不再閃爍**：
   - 舊版只要某一幀手勢判斷閃一下，游標就會退回再跳回來，現在只看確認過的手勢。
   - 濾波參數重新挑過，另外加了 6 px 的不動區。
