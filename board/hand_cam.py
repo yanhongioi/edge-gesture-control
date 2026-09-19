@@ -332,7 +332,7 @@ class PersonPanner:
     人不見了 (或 box 太舊) 就地停住，不要亂轉去找。"""
 
     def __init__(self, panner, deadband=0.15, hold=0.05, dir_sign=-1, mirror=False,
-                 toggle="ok", enabled=True):
+                 toggle="ok", enabled=True, wiggle_seconds=0.2):
         self.panner, self.deadband, self.hold = panner, deadband, max(0.0, hold)
         self.toggle = GestureToggle(toggle, enabled)      # 比 ok 開 / 關「跟著人轉」
         # dx > 0 = 人在畫面右邊 → 鏡頭要往右轉。角度要加還是要減，看馬達怎麼裝 → --servo-dir。
@@ -340,6 +340,7 @@ class PersonPanner:
         # 所以開不開鏡像不會改變馬達該往哪轉 (兩件事互相獨立)。
         self.sign = dir_sign * (-1 if mirror else 1)
         self.moving = 0             # 目前正往哪邊轉 (遲滯要用)
+        self.wiggle = servo.WiggleMotion(wiggle_seconds)
 
     def update(self, person_info, max_age, gesture, t):
         """person_info = PersonLocator.as_dict() 的結果 (沒看到人時是 None)；
@@ -347,6 +348,20 @@ class PersonPanner:
         on, toggled = self.toggle.update(gesture, t)
         if toggled:
             print(f"  {'[O] 雲台追人：開' if on else '[X] 雲台追人：關'}（手勢 {self.toggle.name}）")
+            if on:
+                # 先往離最近極限較遠的一側開始，避免剛好卡在邊界完全看不出輕晃。
+                midpoint = (self.panner.min_angle + self.panner.max_angle) / 2
+                initial_direction = 1 if self.panner.target <= midpoint else -1
+                self.wiggle.start(t, initial_direction)
+                if self.wiggle.segment_seconds > 0:
+                    print("  ↔ 鏡頭輕晃確認，完成後開始跟隨人物")
+            else:
+                self.wiggle.cancel()
+        wiggle_direction = self.wiggle.direction(t) if on else None
+        if wiggle_direction is not None:
+            self.moving = wiggle_direction
+            self.panner.set_direction(wiggle_direction)
+            return self.moving
         if not on or person_info is None or person_info["age"] > max_age:
             self.moving = 0                                  # 關掉 / 沒人 / 資料太舊：停住
         else:
@@ -745,6 +760,8 @@ def main():
                    help="用哪個手勢開 / 關「跟著人轉」(比一次切換一次；空字串 = 不用手勢控制)")
     g.add_argument("--servo-toggle-cooldown", type=float, default=1.5,
                    help="切換後幾秒內不理會同一個手勢 (避免辨識閃爍時連切兩次)")
+    g.add_argument("--servo-wiggle-seconds", type=float, default=0.2,
+                   help="從鎖定切到跟隨時，鏡頭輕晃單段秒數；完整動作為四倍，0 = 關閉")
     g.add_argument("--servo-off", action="store_true",
                    help="一開始不要跟著人轉 (等比 --servo-toggle 手勢才開始)")
     g.add_argument("--servo-start", type=float, default=90.0, help="開機時的起始角度")
@@ -811,7 +828,7 @@ def main():
                 servo.Panner(motor, args.servo_speed, start=args.servo_start,
                              min_angle=args.servo_min, max_angle=args.servo_max).start(),
                 args.servo_deadband, args.servo_hold, args.servo_dir, args.mirror,
-                args.servo_toggle, not args.servo_off)
+                args.servo_toggle, not args.servo_off, args.servo_wiggle_seconds)
             panner.toggle.cooldown = args.servo_toggle_cooldown
             blind = args.servo_speed * args.person_every / max(1, args.fps)
             print(f"雲台啟動：{args.servo_speed:.0f} 度/秒，範圍 {args.servo_min:.0f}~{args.servo_max:.0f} 度，"
@@ -895,7 +912,11 @@ def main():
                 mqtt_pub.publish({"ts": time.time(), "fps": round(fps, 1),
                                   "width": frame.shape[1], "height": frame.shape[0],
                                   "mirror": args.mirror,     # 座標是不是已經左右翻轉過 (PC 端別再翻一次)
-                                  "hands": hands, "person": person_info})
+                                  "hands": hands, "person": person_info,
+                                  # None 表示沒有啟用雲台；布林值讓 PC 端顯示真實切換狀態，
+                                  # 不必靠收到 ok 手勢後自行猜測目前是開還是關。
+                                  "camera_follow": (None if panner is None
+                                                    else panner.toggle.state)})
             if args.display:
                 cv2.imshow(WINDOW_NAME, frame)
                 if cv2.waitKey(1) & 0xFF == ord("q"):

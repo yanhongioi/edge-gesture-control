@@ -118,6 +118,16 @@ COOKING_QUESTION_PATTERN = re.compile(
     r"^\s*(?P<subject>.+?)\s*(?:要)?怎麼(?P<method>做|煮)\s*$",
     re.IGNORECASE,
 )
+COOKING_DESIRE_PATTERN = re.compile(
+    r"^(?:我)?(?:想(?:要)?|要)(?P<method>做|煮)(?P<subject>.+)$",
+    re.IGNORECASE,
+)
+FOOD_NOUN_PATTERN = re.compile(
+    r"海鮮|義大利麵|雞|牛|豬|羊|鴨|鵝|魚|蝦|蟹|肉|蛋|豆腐|蔬菜|青菜|"
+    r"米|飯|麵|粉|湯|粥|餃|包|餅|吐司|麵包|蛋糕|甜點|咖哩|披薩|漢堡|"
+    r"壽司|沙拉|食材|食物|料理",
+    re.IGNORECASE,
+)
 VAGUE_SUBJECTS = frozenset({"這個", "那個", "它", "這", "那"})
 PINNED_YU_AI_QUERY = "雨愛 DJ版"
 MUSIC_PLAYBACK_HINT_PATTERN = re.compile(
@@ -358,7 +368,7 @@ def match_fast_rule(text: str) -> AgentPlan | None:
     timer_plan = _timer_plan(text)
     if timer_plan is not None:
         return timer_plan
-    cooking_match = COOKING_QUESTION_PATTERN.match(text)
+    cooking_match = COOKING_QUESTION_PATTERN.match(plain_command)
     if cooking_match is not None:
         subject = cooking_match.group("subject").strip()
         if subject in VAGUE_SUBJECTS:
@@ -375,6 +385,29 @@ def match_fast_rule(text: str) -> AgentPlan | None:
                 ToolAction(
                     "search_web",
                     {"query": query, "open_first_result": False},
+                ),
+            ),
+            source="rule",
+        )
+    cooking_desire_match = COOKING_DESIRE_PATTERN.match(plain_command)
+    if (
+        cooking_desire_match is not None
+        and FOOD_NOUN_PATTERN.search(cooking_desire_match.group("subject")) is not None
+    ):
+        subject = cooking_desire_match.group("subject").strip()
+        if subject in VAGUE_SUBJECTS:
+            return AgentPlan(
+                intent="clarify",
+                reply="請告訴我要查哪一道料理或食材。",
+                source="rule",
+            )
+        return AgentPlan(
+            intent="action",
+            reply="是的，主人。",
+            actions=(
+                ToolAction(
+                    "search_web",
+                    {"query": f"{subject} 食譜", "open_first_result": False},
                 ),
             ),
             source="rule",

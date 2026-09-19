@@ -101,6 +101,40 @@ class Servo:
         self._write("enable", 0)
 
 
+class WiggleMotion:
+    """Non-blocking three-segment wiggle: one side, across, then back to origin."""
+
+    def __init__(self, segment_seconds=0.2):
+        self.segment_seconds = max(0.0, float(segment_seconds))
+        self.started_at = None
+        self.initial_direction = 1
+
+    def start(self, now, initial_direction=1):
+        if self.segment_seconds <= 0:
+            self.started_at = None
+            return
+        self.started_at = float(now)
+        self.initial_direction = 1 if initial_direction >= 0 else -1
+
+    def cancel(self):
+        self.started_at = None
+
+    def direction(self, now):
+        """Return -1/+1 while moving, then None when the wiggle has finished."""
+        if self.started_at is None:
+            return None
+        elapsed = max(0.0, float(now) - self.started_at)
+        segment = self.segment_seconds
+        if elapsed < segment:
+            return self.initial_direction
+        if elapsed < segment * 3:
+            return -self.initial_direction
+        if elapsed < segment * 4:
+            return self.initial_direction
+        self.started_at = None
+        return None
+
+
 # --------------------------------------------------------------------------------------
 # 定速轉動 (雲台追人用)
 # --------------------------------------------------------------------------------------

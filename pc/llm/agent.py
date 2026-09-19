@@ -32,6 +32,11 @@ WEB_INFORMATION_PATTERN = re.compile(
     r"搜尋|查詢|查找|查|找|比較|推薦|食譜|作法|教學|新聞|資料|資訊",
     re.IGNORECASE,
 )
+COOKING_INFORMATION_PATTERN = re.compile(
+    r"食物|食材|料理|食譜|作法|做法|怎麼(?:做|煮)|"
+    r"(?:我)?(?:想(?:要)?|要)(?:做|煮)",
+    re.IGNORECASE,
+)
 
 
 def _enforce_semantic_policy(text: str, plan: AgentPlan) -> AgentPlan:
@@ -40,7 +45,7 @@ def _enforce_semantic_policy(text: str, plan: AgentPlan) -> AgentPlan:
     if not has_music_action or MUSIC_PLAYBACK_PATTERN.search(text):
         return plan
 
-    if WEB_INFORMATION_PATTERN.search(text):
+    if WEB_INFORMATION_PATTERN.search(text) or COOKING_INFORMATION_PATTERN.search(text):
         query = text.strip()[:200]
         return replace(
             plan,

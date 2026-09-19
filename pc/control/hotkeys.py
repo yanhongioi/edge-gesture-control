@@ -64,6 +64,7 @@ def chord(modifier_vk: int, vk: int) -> tuple[KeyEvent, ...]:
 
 # 手勢 / 語音可以觸發的動作。要加新的就加在這裡，dispatcher 只認這張表的 key。
 ACTIONS: dict[str, tuple[tuple[KeyEvent, ...], str]] = {
+    "double_left_ctrl": (tap(VK_LCONTROL) + tap(VK_LCONTROL), "連按兩下左 Ctrl"),
     "play_pause": (tap(VK_MEDIA_PLAY_PAUSE, extended=True), "播放/暫停"),
     "alt_tab": (chord(VK_LMENU, VK_TAB), "切換視窗 (Alt+Tab)"),
     "next_track": (tap(VK_MEDIA_NEXT_TRACK, extended=True), "下一首"),

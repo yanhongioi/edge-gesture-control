@@ -17,6 +17,7 @@
 #   rock + 捏合    音量加大        rock  音量減小
 #                 音量是「連發動作」：穩定比著 --action-hold 秒後開始，之後每
 #                 --action-repeat 秒調一階 (一次按鍵只動 2%，不連發調不動)
+#   ok            切換鏡頭鎖定 / 跟隨人物（實際雲台控制在板端，PC 只顯示狀態）
 #   open / fist / 其他  不動作 (open 沒捏是起手式兼中立；fist 是拿刀具時的手，永遠不能觸發)
 #
 #   捏合判斷在板子上 (board/gesture.py 的 PinchDetector)，這裡用 MQTT 的 hands[].pinch
@@ -161,9 +162,10 @@ class CursorController:
 
     BACK = 2                    # 捏下 / 放開時，用幾筆之前的位置 (拇指一動，食指也會跟著抖一下)
 
-    def __init__(self, args, screen, out=None):
+    def __init__(self, args, screen, out=None, hotkey_sender=None):
         self.args, (self.sw, self.sh) = args, screen
         self.out = out or WINDOWS_OUTPUT
+        self.hotkey_sender = hotkey_sender or hotkeys.HotkeySender(dry_run=args.dry_run)
         self.fx = OneEuro(args.min_cutoff, args.beta, args.d_cutoff)
         self.fy = OneEuro(args.min_cutoff, args.beta, args.d_cutoff)
         self.history = deque(maxlen=self.BACK + 1)    # 最近幾筆濾波後的位置
@@ -228,6 +230,12 @@ class CursorController:
             self.armed, self.lock_pos = False, None
             self.fx.reset(); self.fy.reset(); self.history.clear()
             print(f"  ● 游標模式開始（{CURSOR_GESTURE}）")
+            try:
+                label = self.hotkey_sender.fire("double_left_ctrl")
+                print(f"  ★ {label}"
+                      + ("  [dry-run，沒有真的送出]" if a.dry_run else ""))
+            except hotkeys.HotkeyError as exc:
+                print(f"  ※ 連按兩下左 Ctrl 失敗：{exc}")
 
         # 換成其他手勢：先停住，超過 grace 秒才結束 (中間的誤判不會打斷拖曳)
         if g != CURSOR_GESTURE:
@@ -352,6 +360,13 @@ def gesture_token(hand):
     if g is None:
         return None
     return g + PINCH_SUFFIX if hand.get("pinch") else g
+
+
+def camera_follow_debug_message(enabled, initial=False):
+    """Format the board-reported pan mode without guessing from the OK gesture."""
+    mode = "跟隨人物" if enabled else "鏡頭鎖定（停止跟隨）"
+    prefix = "[鏡頭] 目前模式" if initial else "★ ok → 鏡頭模式"
+    return f"  {prefix}：{mode}"
 
 
 class GestureActionDispatcher:
@@ -554,7 +569,7 @@ def main():
     scroll = ScrollJoystick(args)
     actions = None if args.no_actions else GestureActionDispatcher(args)
     lock = threading.Lock()
-    state = {"stamp": 0.0}
+    state = {"stamp": 0.0, "camera_follow": None}
 
     def on_connect(client, userdata, flags, reason_code, properties=None):
         print(f"MQTT connected to {args.broker}:{args.port} ({reason_code}), subscribe {TOPIC}")
@@ -569,6 +584,13 @@ def main():
         hand = hands[0] if hands else None
         now = time.monotonic()
         with lock:
+            camera_follow = data.get("camera_follow")
+            if isinstance(camera_follow, bool) and camera_follow != state["camera_follow"]:
+                print(camera_follow_debug_message(
+                    camera_follow,
+                    initial=state["camera_follow"] is None,
+                ))
+                state["camera_follow"] = camera_follow
             cursor.board_mirror = bool(data.get("mirror"))    # 板子 >= 2026-09-19 版才有這個欄位
             cursor.update(hand, now)
             if cursor.state == "idle":
@@ -594,6 +616,7 @@ def main():
     print(f"手勢對應: {CURSOR_GESTURE} = 游標 (跟著 {args.anchor}){click}，"
           f"{SCROLL_GESTURE} = 捲動 (捏合 = 往上 / 放開 = 往下)"
           f"{'  [dry-run，不會真的控制]' if args.dry_run else ''}")
+    print("鏡頭手勢: ok = 鎖定 / 跟隨人物（切換由板端執行，狀態會顯示在這裡）")
     if actions is not None:
         pairs = "，".join(f"{t} = {hotkeys.describe(a)}" for t, a in sorted(args.action_map.items()))
         print(f"快捷鍵: {pairs}"

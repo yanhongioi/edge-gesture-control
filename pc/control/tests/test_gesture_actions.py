@@ -7,9 +7,11 @@ import unittest
 
 from pc.control import hotkeys
 from pc.gesture_control import (
+    CursorController,
     DEFAULT_ACTION_MAP,
     GestureActionDispatcher,
     gesture_token,
+    camera_follow_debug_message,
     parse_action_map,
 )
 
@@ -71,6 +73,30 @@ class TokenTests(unittest.TestCase):
         self.assertEqual(gesture_token({"gesture": "open", "pinch": True}), "open+pinch")
         self.assertIsNone(gesture_token(None))
         self.assertIsNone(gesture_token({"gesture": None, "pinch": True}))
+
+    def test_camera_follow_debug_message_reports_board_state(self) -> None:
+        self.assertIn("跟隨人物", camera_follow_debug_message(True))
+        self.assertIn("鏡頭鎖定", camera_follow_debug_message(False))
+        self.assertIn("目前模式", camera_follow_debug_message(True, initial=True))
+
+    def test_point_mode_start_double_taps_left_ctrl_once(self) -> None:
+        args = argparse.Namespace(
+            min_cutoff=0.5, beta=0.05, d_cutoff=0.3, dry_run=True,
+            no_click=True, prefreeze=0.4, lock_timeout=1.0,
+            press_settle=0.2, release_settle=0.1, grace=0.3,
+            anchor="pip", no_mirror=False, region=0.4,
+            center_x=0.5, center_y=0.5, deadband=6.0,
+        )
+        sender = FakeSender()
+        cursor = CursorController(args, (1920, 1080), hotkey_sender=sender)
+        hand = {"gesture": "point", "pinch": False,
+                "landmarks": [[0.5, 0.5] for _ in range(21)]}
+        cursor.update(hand, 1.0)
+        cursor.update(hand, 1.1)
+        cursor.update({"gesture": "open"}, 1.2)
+        cursor.update({"gesture": "open"}, 1.6)
+        cursor.update(hand, 1.7)
+        self.assertEqual(sender.fired, ["double_left_ctrl", "double_left_ctrl"])
 
 
 class DispatcherTests(unittest.TestCase):

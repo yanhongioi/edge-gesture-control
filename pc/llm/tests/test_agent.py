@@ -195,6 +195,33 @@ class AgentPlannerTests(unittest.TestCase):
         self.assertFalse(plan.actions[0].arguments["open_first_result"])
         self.assertEqual(client.calls, 0)
 
+    def test_cooking_question_with_punctuation_skips_model(self) -> None:
+        client = FakeClient("not used")
+        plan = AgentPlanner(client=client).plan("雞胸肉要怎麼煮?")  # type: ignore[arg-type]
+        self.assertEqual(plan.source, "rule")
+        self.assertEqual(plan.actions[0].tool, "search_web")
+        self.assertEqual(plan.actions[0].arguments["query"], "雞胸肉怎麼煮")
+        self.assertFalse(plan.actions[0].arguments["open_first_result"])
+        self.assertEqual(client.calls, 0)
+
+    def test_cooking_desire_uses_recipe_search_and_skips_model(self) -> None:
+        client = FakeClient("not used")
+        plan = AgentPlanner(client=client).plan("我想做海鮮義大利麵。")  # type: ignore[arg-type]
+        self.assertEqual(plan.source, "rule")
+        self.assertEqual(plan.actions[0].tool, "search_web")
+        self.assertEqual(plan.actions[0].arguments["query"], "海鮮義大利麵 食譜")
+        self.assertFalse(plan.actions[0].arguments["open_first_result"])
+        self.assertEqual(client.calls, 0)
+
+    def test_non_food_desire_is_not_assumed_to_be_a_recipe(self) -> None:
+        client = FakeClient(
+            '{"intent":"answer","reply":"可以先列出作業需求。","actions":[]}'
+        )
+        plan = AgentPlanner(client=client).plan("我想做作業")  # type: ignore[arg-type]
+        self.assertEqual(plan.source, "llm")
+        self.assertEqual(plan.actions, ())
+        self.assertEqual(client.calls, 1)
+
     def test_cooking_question_without_concrete_noun_asks_for_clarification(self) -> None:
         client = FakeClient("not used")
         plan = AgentPlanner(client=client).plan("這個怎做")  # type: ignore[arg-type]
@@ -235,6 +262,17 @@ class AgentPlannerTests(unittest.TestCase):
             '{"query":"iPhone Pixel 比較","selection":"playlist"}}]}'
         )
         plan = AgentPlanner(client=client).plan("比較 iPhone 和 Pixel")  # type: ignore[arg-type]
+        self.assertEqual(plan.source, "policy")
+        self.assertEqual(plan.actions[0].tool, "search_web")
+        self.assertFalse(plan.actions[0].arguments["open_first_result"])
+
+    def test_cooking_request_misclassified_as_music_is_redirected_to_search(self) -> None:
+        client = FakeClient(
+            '{"intent":"action","reply":"播放。","actions":'
+            '[{"tool":"play_music","arguments":'
+            '{"query":"海鮮義大利麵","selection":"track"}}]}'
+        )
+        plan = AgentPlanner(client=client).plan("海鮮義大利麵有哪些做法")  # type: ignore[arg-type]
         self.assertEqual(plan.source, "policy")
         self.assertEqual(plan.actions[0].tool, "search_web")
         self.assertFalse(plan.actions[0].arguments["open_first_result"])
