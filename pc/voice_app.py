@@ -147,7 +147,11 @@ def main() -> int:
                 utterance = segmenter.accept(microphone.read_chunk())
                 if utterance is None:
                     continue
-                if args.mqtt_wake and not wake_gate.is_armed():
+                if (
+                    args.mqtt_wake
+                    and not wake_gate.is_armed()
+                    and not pipeline.awaiting_followup
+                ):
                     print("[略過] 板子沒有喚醒，這句不送 Whisper。")
                     continue
 
