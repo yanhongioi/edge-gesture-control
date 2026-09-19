@@ -133,7 +133,7 @@ py -3.11 .\pc\gesture_control.py --no-click           # 關掉捏合點擊，只
 py -3.11 .\pc\gesture_control.py --scroll-base 600    # 基本捲動速度快一點（預設 360 = 每秒 3 格）
 py -3.11 .\pc\gesture_control.py --scroll-gain 20000  # 推離起點時加速更多（預設 12000）；--scroll-invert 上下反過來
 py -3.11 .\pc\gesture_control.py --scroll-hold 1.0    # 掉幀時繼續捲久一點（預設 0.5 秒）
-py -3.11 .\pc\gesture_control.py --no-mirror          # 板子有加 --mirror 時要加
+py -3.11 .\pc\gesture_control.py --no-mirror          # 完全不要翻轉（正常不用，板子會自己說它翻過了）
 py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
 ```
 
@@ -155,7 +155,8 @@ py -3.11 .\pc\gesture_control.py --broker <IP>        # broker 在別台電腦
   - 濾波參數重新挑過，另外加了 6 px 的不動區。
   - 模擬測試（骨架點抖動約 ±11 px）：靜止時每秒閃動從約 21 次降到約 4 次；快速移動（1500 px/s）的落後從約 21 px 降到約 3 px。實際效果要上板確認。
 - **左鍵不會卡住**：手不見、換成其他手勢超過 0.3 秒、資料中斷、按 Ctrl+C，都會先放開。
-- **對應方式**：鏡頭畫面**中央 40%** 對應整個主螢幕，預設左右翻轉；程式會使用實際像素座標，Windows 縮放 125% / 150% 時也對得準。
+- **對應方式**：鏡頭畫面**中央 40%** 對應整個主螢幕；程式會使用實際像素座標，Windows 縮放 125% / 150% 時也對得準。
+- **左右翻轉**：板子預設就會翻轉畫面（像照鏡子），並在 MQTT 送出 `mirror` 欄位，PC 端看到就不會再翻第二次，不用自己加 `--no-mirror`。
 - **還沒做**：右鍵；裝上雲台後改用「手相對於人物框」的位置。
 
 ### 用另一台電腦接收 / 被控制
@@ -202,7 +203,7 @@ git push
 | `python3 hand_cam.py --display` | 在板子的 HDMI 螢幕 / 投影機上全螢幕顯示（`--windowed` = 小視窗；按 `q` 結束）。投影機要在**板子開機前**就打開並切到這個 HDMI 輸入，見下方已知問題 |
 | `python3 hand_cam.py --image test_images/hand-1.jpg` | 單張圖片測試，結果存到 `output/` |
 | `python3 hand_cam.py --delegate cpu` | 改用 CPU 跑（跟 NPU 比較，demo 用） |
-| `python3 hand_cam.py --mirror` | 畫面左右翻轉 |
+| `python3 hand_cam.py --no-mirror` | 關掉畫面左右翻轉（預設是翻轉的，像照鏡子） |
 | `python3 hand_cam.py --no-track` / `--no-person-search` / `--person-every 0` | 關掉手部追蹤 / 人物附近找手 / 人物偵測（比較用） |
 | `python3 hand_cam.py -h` | 所有參數 |
 
@@ -218,7 +219,7 @@ ping -c 1 pypi.org                     # 網址解析 (DNS) 正不正常
 v4l2-ctl --list-devices                # 鏡頭節點（C270 = /dev/video2）
 ls /dev/ethosu0                        # NPU 在不在
 python3 /root/edge-gesture-control/board/servo.py 90     # 雲台轉到 90 度（sweep = 掃一次；off = 放鬆）
-python3 /root/edge-gesture-control/board/hand_cam.py --servo   # 雲台追人（轉錯邊加 --servo-invert）
+python3 /root/edge-gesture-control/board/hand_cam.py --servo   # 雲台追人（轉錯邊改 --servo-dir 1）
 python3 /root/edge-gesture-control/board/hand_cam.py --servo --servo-off  # 待命，比 ok 才開始追人
 arecord -l                             # 錄音裝置（C270 麥克風 = card WEBCAM）
 arecord -D plughw:CARD=WEBCAM,DEV=0 -f S16_LE -r 16000 -c 1 -d 5 -V mono /tmp/mic_test.wav   # 錄 5 秒測試
@@ -429,7 +430,7 @@ C270 640×480
   - 舵機使用獨立電源。
   - **控制方式**：定速 bang-bang + 遲滯，不是比例控制。`dx` 超過 `--servo-deadband`（0.15）就往那邊用 `--servo-speed`（25 度/秒）一直轉，轉到 `dx` 小於 `--servo-hold`（0.05）才停。兩個門檻不同是為了不要在門檻附近抖。
   - **轉動在背景執行緒**（`servo.Panner`）：`servo.move_to()` 裡面會 sleep，直接在主迴圈呼叫會卡住影格。角度用「速度 × 經過秒數」累積，跟執行緒被排到的頻率無關。
-  - **方向**：`dx > 0` = 人在畫面右邊。角度要加還是要減看馬達怎麼裝 → `--servo-invert`；`--mirror` 時畫面已翻轉，程式會自動再反一次。
+  - **方向**：`dx > 0` = 人在畫面右邊。角度要加還是要減**只由馬達怎麼裝決定** → `--servo-dir`（`-1` / `1`，預設 `-1`）。畫面翻轉造成的左右顛倒程式會先抵銷掉，所以**開不開鏡像不會改變馬達該往哪轉**，這兩件事互相獨立，調的時候不要一起動。
   - 人不見或人物框太舊（超過 `--person-every` × 2 幀）就地停住，不亂轉去找人。
   - **開關**：比一次 `ok` 手勢切換「要不要跟著人轉」（`--servo-toggle` 可換成別的手勢，空字串 = 關掉這功能）。只認手勢「第一次出現」那一下，一直比著不會連切；切換後 `--servo-toggle-cooldown`（1.5 秒）內不理會同一個手勢。關掉時馬達就地停住，不是回中。`--servo-off` = 開機先待命，比 `ok` 才開始追。
 
