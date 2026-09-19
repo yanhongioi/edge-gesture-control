@@ -9,7 +9,11 @@
 #   two           捲動：食指、中指指向上 = 往上捲，指向下 = 往下捲 (橫的 = 暫停)
 #                 速度：基本速度 + 往手指方向推離起點 (比出 two 那一刻的手掌高度) 越遠越快
 #                 短暫掉幀 (--scroll-hold 秒以內) 用原本的速度繼續捲，起點不重算
-#   open / fist / 其他  不動作 (open 是起手式；fist 是拿刀具時的手，永遠不能觸發)
+#   open + 捏合    播放/暫停 (張開手掌再捏一下；放開手掌就能再捏一次)
+#   thumbs_up     切換視窗 (Alt+Tab)
+#                 這兩個是「一次性動作」：比出來只送一次，要先回到中立姿勢才能再觸發
+#                 (中立 = 手掌張開沒捏 / 握拳 / 手移出畫面)。--action-map 可以改對應
+#   open / fist / 其他  不動作 (open 沒捏是起手式兼中立；fist 是拿刀具時的手，永遠不能觸發)
 #
 #   捏合判斷在板子上 (board/gesture.py 的 PinchDetector)，這裡用 MQTT 的 hands[].pinch
 #   手不見、換成其他手勢、資料中斷、程式結束 → 游標模式結束，按住的左鍵一律放開
@@ -46,15 +50,19 @@ CURSOR_GESTURE = "point"
 SCROLL_GESTURE = "two"
 
 # 一次性快捷鍵 (見 GestureActionDispatcher)
-# 中立手勢：看到其中之一才會重新「上膛」，同一個手勢比著不放不會連發。
-# open 是起手式，fist 按設計永遠不觸發任何動作 (拿刀具的手)，兩者都適合當中立。
-NEUTRAL_GESTURES = (None, "open", "fist")
-DEFAULT_ACTION_MAP = {"thumbs_up": "play_pause", "ok": "alt_tab"}
+# 觸發條件是「手勢 + 捏合狀態」的組合，寫成 token：手勢名稱，捏著的話加上 "+pinch"。
+# 這樣 open (張開手掌) 和 open+pinch (張開手掌再捏一下) 才分得開 —— 前者是中立，後者觸發動作。
+PINCH_SUFFIX = "+pinch"
+# 中立 token：看到其中之一才會重新「上膛」，同一個姿勢維持著不會連發。
+# open 沒捏 = 起手式；fist 按設計永遠不觸發任何動作 (拿刀具的手)；手不見 = None。
+NEUTRAL_TOKENS = (None, "open", "fist")
+DEFAULT_ACTION_MAP = {"open" + PINCH_SUFFIX: "play_pause", "thumbs_up": "alt_tab"}
 # board/gesture.py classify_landmarks() 會回傳的全部手勢
 KNOWN_GESTURES = ("point", "two", "three", "four", "six", "rock", "ok", "open", "fist",
                   "thumbs_up")
-# 已經有其他用途，不可以再綁快捷鍵
-RESERVED_GESTURES = (CURSOR_GESTURE, SCROLL_GESTURE, "fist", "open")
+# 這些手勢已經有其他用途，捏不捏合都不可以再綁快捷鍵：
+#   point 游標 (+pinch 是點擊 / 拖曳)、two 捲動、fist 安全考量永遠不觸發
+RESERVED_GESTURES = (CURSOR_GESTURE, SCROLL_GESTURE, "fist")
 
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
@@ -335,14 +343,25 @@ class ScrollJoystick:
         self.anchor, self.rate, self.dir, self.lost_since = None, 0.0, 0, None
 
 
+def gesture_token(hand):
+    """(手勢, 捏合) → 觸發用的 token。手不見時是 None。
+    捏合狀態是板子算的 (board/gesture.py 的 PinchDetector)，已經過遲滯 + 連續幀。"""
+    g = hand.get("gesture") if hand else None
+    if g is None:
+        return None
+    return g + PINCH_SUFFIX if hand.get("pinch") else g
+
+
 class GestureActionDispatcher:
     """一次性快捷鍵 (播放/暫停、切視窗)。和 point/two 的「連續模式」不同：
-    只在『確認手勢改變』的那一瞬間送一次，不是每幀送。
+    只在『token 改變』的那一瞬間送一次，不是每幀送。
 
     防連發有兩道，缺一不可：
-      armed  比出動作手勢後就「卸膛」，要先看到中立手勢 (open / fist / 手不見) 才會重新上膛。
-             沒有這個的話，thumbs_up 比著不放 = 音樂瘋狂 play/pause。
-      cooldown  擋住 thumbs_up → None → thumbs_up 這種一瞬間的閃爍 (中間的 None 會重新上膛)。
+      armed  觸發後就「卸膛」，要先看到中立 token (open 沒捏 / fist / 手不見) 才會重新上膛。
+             沒有這個的話，捏著不放 = 音樂瘋狂 play/pause。
+      cooldown  擋住 open+pinch → open → open+pinch 這種一瞬間的抖動 (中間的 open 會重新上膛)。
+
+    open / open+pinch 這組搭配得剛好：張開手掌是中立，捏一下觸發，放開就自動重新上膛。
 
     只有游標和捲動都沒在跑的時候才會被呼叫，所以拖曳 / 捲動中途不會誤觸。"""
 
@@ -355,14 +374,14 @@ class GestureActionDispatcher:
         self.cooldown_until = 0.0
 
     def update(self, hand, t):
-        g = hand.get("gesture") if hand else None
-        if g == self.last:
-            return                       # 同一個手勢持續中，不重複觸發
-        self.last = g
-        if g in NEUTRAL_GESTURES:
+        token = gesture_token(hand)
+        if token == self.last:
+            return                       # 同一個姿勢持續中，不重複觸發
+        self.last = token
+        if token in NEUTRAL_TOKENS:
             self.armed = True
             return
-        action = self.action_map.get(g)
+        action = self.action_map.get(token)
         if action is None or not self.armed or t < self.cooldown_until:
             return
         self.armed = False
@@ -370,9 +389,9 @@ class GestureActionDispatcher:
         try:
             label = self.sender.fire(action)
         except hotkeys.HotkeyError as exc:
-            print(f"  ※ {g} → {action} 失敗：{exc}")
+            print(f"  ※ {token} → {action} 失敗：{exc}")
             return
-        print(f"  ★ {g} → {label}" + ("  [dry-run，沒有真的送出]" if self.args.dry_run else ""))
+        print(f"  ★ {token} → {label}" + ("  [dry-run，沒有真的送出]" if self.args.dry_run else ""))
 
     def stop(self):
         """收尾：確保沒有修飾鍵卡在按住的狀態 (見 hotkeys.py 的說明)"""
@@ -380,26 +399,33 @@ class GestureActionDispatcher:
 
 
 def parse_action_map(text):
-    """"thumbs_up=play_pause,ok=alt_tab" → dict。名稱錯了就直接報錯，
-    不要讓使用者以為綁好了、到現場才發現沒反應。"""
+    """"open+pinch=play_pause,thumbs_up=alt_tab" → dict。
+    token 是「手勢」或「手勢+pinch」(比出該手勢並且捏合)。
+    名稱錯了就直接報錯，不要讓使用者以為綁好了、到現場才發現沒反應。"""
     mapping = {}
     for pair in text.split(","):
         pair = pair.strip()
         if not pair:
             continue
-        gesture_name, sep, action = (s.strip() for s in pair.partition("="))
-        if not sep or not gesture_name or not action:
+        token, sep, action = (s.strip() for s in pair.partition("="))
+        if not sep or not token or not action:
             raise argparse.ArgumentTypeError(f"格式要是 手勢=動作，收到 {pair!r}")
-        if gesture_name not in KNOWN_GESTURES:
+        base = token[:-len(PINCH_SUFFIX)] if token.endswith(PINCH_SUFFIX) else token
+        if base not in KNOWN_GESTURES:
             raise argparse.ArgumentTypeError(
-                f"沒有 {gesture_name!r} 這個手勢（可用：{', '.join(KNOWN_GESTURES)}）")
-        if gesture_name in RESERVED_GESTURES:
+                f"沒有 {base!r} 這個手勢（可用：{', '.join(KNOWN_GESTURES)}；"
+                f"要加上捏合就寫成 手勢{PINCH_SUFFIX}）")
+        if base in RESERVED_GESTURES:
             raise argparse.ArgumentTypeError(
-                f"{gesture_name!r} 已經有其他用途（游標 / 捲動 / 中立手勢），不能綁快捷鍵")
+                f"{base!r} 已經有其他用途（游標 / 點擊 / 捲動 / 安全考量），不能綁快捷鍵")
+        if token in NEUTRAL_TOKENS:
+            raise argparse.ArgumentTypeError(
+                f"{token!r} 是中立姿勢（用來讓快捷鍵重新上膛），不能綁快捷鍵；"
+                f"改綁 {token}{PINCH_SUFFIX}（比這個手勢並捏合）")
         if action not in hotkeys.ACTIONS:
             raise argparse.ArgumentTypeError(
                 f"沒有 {action!r} 這個動作（可用：{', '.join(sorted(hotkeys.ACTIONS))}）")
-        mapping[gesture_name] = action
+        mapping[token] = action
     return mapping
 
 
@@ -504,8 +530,10 @@ def main():
           f"{SCROLL_GESTURE} = 捲動 (手指向上 / 向下)"
           f"{'  [dry-run，不會真的控制]' if args.dry_run else ''}")
     if actions is not None:
-        pairs = "，".join(f"{g} = {hotkeys.describe(a)}" for g, a in sorted(args.action_map.items()))
-        print(f"快捷鍵: {pairs}（比完要先回到 open / 握拳 / 把手收起來才能再觸發一次）")
+        pairs = "，".join(f"{t} = {hotkeys.describe(a)}" for t, a in sorted(args.action_map.items()))
+        print(f"快捷鍵: {pairs}"
+              f"（+pinch = 比該手勢並捏合；觸發後要先回到中立姿勢"
+              f"「手掌張開沒捏 / 握拳 / 手收起來」才能再觸發一次）")
     print(f"螢幕 {screen[0]}x{screen[1]}，鏡頭畫面中央 {args.region:.0%} 對應整個螢幕"
           f"{'，左右翻轉' if not args.no_mirror else ''}。Ctrl+C 結束。")
 
