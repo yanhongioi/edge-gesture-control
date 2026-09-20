@@ -6,8 +6,8 @@ $ErrorActionPreference = "Stop"
 # ==============================================================================
 # Network settings -- normally only these two IP addresses need to be changed.
 # ==============================================================================
-$BoardIp = "192.168.7.2"       # i.MX93 board SSH address
-$PcIp = "192.168.7.1"          # PC address that receives MQTT from the board
+$BoardIp = "172.20.10.4"       # i.MX93 board SSH address
+$PcIp = "172.20.10.2"          # PC address that receives MQTT from the board
 
 # Board settings.
 $SshUser = "root"

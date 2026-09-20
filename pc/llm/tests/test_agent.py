@@ -116,6 +116,8 @@ class AgentPlannerTests(unittest.TestCase):
             ("暫停", "pause"),
             ("幫我暫停影片", "pause"),
             ("播放", "play"),
+            ("開始", "play"),
+            ("開始播放", "play"),
             ("請幫我播放音樂", "play"),
             ("繼續播放", "play"),
         ):

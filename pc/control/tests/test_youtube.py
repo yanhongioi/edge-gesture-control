@@ -26,7 +26,7 @@ class YouTubeTests(unittest.TestCase):
         self.assertEqual(
             result.url,
             "https://www.youtube.com/watch?"
-            "v=8cazyIg6M8k&list=RD8cazyIg6M8k&start_radio=1",
+            "v=8cazyIg6M8k&list=RD8cazyIg6M8k&start_radio=1&autoplay=1",
         )
 
     def test_direct_video_is_used(self) -> None:
@@ -37,7 +37,10 @@ class YouTubeTests(unittest.TestCase):
         )
         self.assertTrue(result.direct_result)
         self.assertEqual(result.selection, "track")
-        self.assertEqual(result.url, "https://www.youtube.com/watch?v=test123")
+        self.assertEqual(
+            result.url,
+            "https://www.youtube.com/watch?v=test123&autoplay=1",
+        )
 
     def test_non_youtube_result_falls_back_to_search(self) -> None:
         result = play_music(
@@ -117,7 +120,10 @@ class YouTubeTests(unittest.TestCase):
         response = mocked_open.return_value.__enter__.return_value
         response.read.return_value = b'{"videoId":"video12345"}'
         url = resolve_youtube_result("周杰倫 晴天", "track")
-        self.assertEqual(url, "https://www.youtube.com/watch?v=video12345")
+        self.assertEqual(
+            url,
+            "https://www.youtube.com/watch?v=video12345&autoplay=1",
+        )
 
     def test_empty_query_is_rejected(self) -> None:
         with self.assertRaises(YouTubeError):

@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import ctypes
 import sys
+from urllib.parse import parse_qs, urlparse
 
 from .youtube import YouTubePlaybackResult
 
@@ -63,7 +64,8 @@ class PlaybackController:
         # 搜尋結果頁並未開始播放，因此只有直達影片／歌單才算有效媒體。
         if playback.direct_result:
             self._media_url = playback.url
-            self._playing = True
+            autoplay = parse_qs(urlparse(playback.url).query).get("autoplay", [])
+            self._playing = "1" in autoplay
 
     def control(self, operation: str) -> PlaybackControlResult:
         if operation not in PLAYBACK_OPERATIONS:

@@ -6,7 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 import re
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 import webbrowser
 
@@ -19,7 +19,7 @@ YOUTUBE_HOSTS = frozenset(
 PINNED_TRACK_URLS = {
     "雨愛 dj版": (
         "https://www.youtube.com/watch?"
-        "v=8cazyIg6M8k&list=RD8cazyIg6M8k&start_radio=1"
+        "v=8cazyIg6M8k&list=RD8cazyIg6M8k&start_radio=1&autoplay=1"
     ),
 }
 
@@ -107,7 +107,7 @@ def resolve_youtube_result(
         match = re.search(r'"videoId":"([A-Za-z0-9_-]{6,20})"', html)
         if match:
             return "https://www.youtube.com/watch?" + urlencode(
-                {"v": match.group(1)}
+                {"v": match.group(1), "autoplay": "1"}
             )
     return None
 
@@ -130,6 +130,20 @@ def _is_direct_youtube_result(url: str | None, selection: str) -> bool:
             return bool(parsed.path.strip("/"))
         return parsed.path.rstrip("/") == "/watch" and bool(parameters.get("v"))
     return False
+
+
+def _ensure_watch_autoplay(url: str) -> str:
+    """Make direct YouTube watch URLs agree with the controller's playing state."""
+    parsed = urlparse(url)
+    if parsed.path.rstrip("/") != "/watch":
+        return url
+    parameters = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key.casefold() != "autoplay"
+    ]
+    parameters.append(("autoplay", "1"))
+    return urlunparse(parsed._replace(query=urlencode(parameters)))
 
 
 def play_music(
@@ -163,7 +177,7 @@ def play_music(
         )
     direct_result = _is_direct_youtube_result(candidate, selection)
     url = (
-        candidate
+        _ensure_watch_autoplay(candidate)
         if direct_result and candidate is not None
         else build_youtube_search_url(fallback_query)
     )

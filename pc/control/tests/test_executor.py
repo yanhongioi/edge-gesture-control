@@ -17,7 +17,7 @@ def fake_music_player(
         raise AssertionError("expected browser playback")
     return YouTubePlaybackResult(
         query=query,
-        url="https://www.youtube.com/watch?v=test",
+        url="https://www.youtube.com/watch?v=test&autoplay=1",
         selection=selection,
         direct_result=True,
     )
@@ -157,6 +157,26 @@ class ExecutorTests(unittest.TestCase):
         resumed = self.executor.execute(resume_plan, confirmed=True)[0]
         self.assertTrue(resumed.details["changed"])
         self.assertEqual(self.media_toggles, ["toggle", "toggle"])
+
+    def test_media_without_autoplay_starts_in_paused_state(self) -> None:
+        toggles: list[str] = []
+        controller = PlaybackController(
+            toggle_sender=lambda: toggles.append("toggle")
+        )
+        controller.remember(
+            YouTubePlaybackResult(
+                query="K-pop playlist",
+                url="https://www.youtube.com/playlist?list=PLtest123",
+                selection="playlist",
+                direct_result=True,
+            )
+        )
+        self.assertFalse(controller.playing)
+        paused = controller.control("pause")
+        self.assertFalse(paused.changed)
+        resumed = controller.control("play")
+        self.assertTrue(resumed.changed)
+        self.assertEqual(toggles, ["toggle"])
 
     def test_scroll_is_dispatched_after_confirmation(self) -> None:
         plan = AgentPlan(

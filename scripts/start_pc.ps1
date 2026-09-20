@@ -6,7 +6,7 @@ $ErrorActionPreference = "Stop"
 # ==============================================================================
 # Network settings -- edit these values when the board or PC network changes.
 # ==============================================================================
-$BoardIp = "192.168.7.2"       # i.MX93 board: audio_stream.py TCP server
+$BoardIp = "172.20.10.4"       # i.MX93 board: audio_stream.py TCP server
 $BrokerIp = "127.0.0.1"        # This PC: address used by the two PC clients
 
 # Usually these do not need to change.
