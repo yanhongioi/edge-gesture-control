@@ -294,6 +294,8 @@ class AgentPlannerTests(unittest.TestCase):
             "我想聽語愛低階版",
             "來首魚愛迪傑版",
             "播放瑜愛低機版",
+            "播放與IDJ版",
+            "幫我放與 i DJ 版",
         ):
             with self.subTest(text=text):
                 client = FakeClient("not used")

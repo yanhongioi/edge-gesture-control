@@ -136,7 +136,7 @@ MUSIC_PLAYBACK_HINT_PATTERN = re.compile(
 )
 YU_AI_DJ_PATTERN = re.compile(
     r"[雨與与予語语羽宇魚鱼玉遇禹余於于娛娱愉瑜渝逾育浴欲預预御郁寓譽誉]"
-    r"[愛爱](?:(?:dj|dg|迪傑|迪杰|低階|低阶|低機|低机|低級|低级)(?:版)?)?",
+    r"[愛爱i](?:(?:dj|dg|迪傑|迪杰|低階|低阶|低機|低机|低級|低级)(?:版)?)?",
     re.IGNORECASE,
 )
 TIMER_HINT_PATTERN = re.compile(r"計時|倒數|計時器|提醒", re.IGNORECASE)
